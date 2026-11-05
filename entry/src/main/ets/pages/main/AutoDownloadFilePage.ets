@@ -1,4 +1,5 @@
 import { HdsSubDestination } from '../common/HdsSubDestination';
+import { BLUR_MAX_VP, EDGE_OVERLAY_VP, topEdgeBlurStops } from '../../util/scrollEdgeBlur';
 import {
   applyAutoDownloadSubpageToggle,
   setNumber,
@@ -36,6 +37,7 @@ export function AutoDownloadFilePageBuilder(): void {
 @Component
 export struct AutoDownloadFilePage {
   private pageScroller: Scroller = new Scroller();
+  @State private blurViewH: number = 0;
   @StorageProp(LANGUAGE_EPOCH) langEpoch: number = 0;
   @StorageProp('bottomSafeHeight') bottomSafe: number = 0;
   @StorageProp(KEY_AUTODOWNLOAD_MASTER) autoDownloadMaster: boolean = true;
@@ -153,14 +155,24 @@ export struct AutoDownloadFilePage {
             this.sizeLimitCard();
           }
           .width('100%')
-          .padding({ left: 12, right: 12, top: 6, bottom: this.bottomSafe + 24 });
+          .padding({ left: 12, right: 12, top: EDGE_OVERLAY_VP, bottom: this.bottomSafe + 24 });
         }
         .align(Alignment.Top)
         .layoutWeight(1)
         .width('100%')
         .scrollBar(BarState.Off)
         .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
-        .clip(false);
+        .clip(false)
+        .linearGradientBlur(BLUR_MAX_VP, {
+          fractionStops: topEdgeBlurStops(this.blurViewH),
+          direction: GradientDirection.Bottom
+        })
+        .onAreaChange((_old: Area, area: Area): void => {
+          const h: number = Number(area.height);
+          if (h > 0 && Math.abs(h - this.blurViewH) > 0.5) {
+            this.blurViewH = h;
+          }
+        });
       }
     }
     .width('100%')

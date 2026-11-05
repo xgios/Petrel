@@ -219,6 +219,7 @@ import { hasPrefetchedPage } from '../../util/chatPrefetch';
 import { subscribeChatJump } from '../../util/chatJumpChannel';
 import { clearNowPlaying, NowPlaying, publishNowPlaying } from '../../util/nowPlayingChannel';
 import { viewerFullScreenWanted, viewerHidesTitleBar } from '../../util/navFullScreen';
+import { KEY_CHAT_DETAIL_SHOWN } from '../../util/navBarReset';
 import { isSystemTopBarReady, restoreViewerSystemBars } from '../../util/systemBarsWindow';
 import { publishViewerCoversWindow } from '../../util/viewerWindowCover';
 import {
@@ -1060,6 +1061,13 @@ export struct ChatPage {
   // 贴纸合集面板（点消息里的贴纸弹出来的那张）。
   @Local stickerSetSheetOpen: boolean = false;
   @Local stickerSetSheetId: string = '';
+  // 面板内容的挂载态，和"抽屉是否可见"分开。
+  //
+  // 【为什么要分开】点格子会先发贴纸、再把 stickerSetSheetOpen 置 false 收起
+  // 抽屉。原来 builder 里的 if 读的是同一个标志，于是内容在收起动画之前就被摘掉
+  // ——用户看到的就是一个空白白抽屉（2026-11-05 实报）。现在收起期间内容继续
+  // 挂着，等 onDisappear 真正消失后再卸载。
+  @Local stickerSetSheetMounted: boolean = false;
 
   // 当前打开的底部抽屉占据的高度（附件或表情，两者互斥）。supportAvoidance
   // 只保证输入框不被挡，列表内容它不管——官方《自定义键盘》文档明说这一段
@@ -3216,6 +3224,7 @@ export struct ChatPage {
   }
 
   private handleHidden(): void {
+    AppStorage.setOrCreate<boolean>(KEY_CHAT_DETAIL_SHOWN, false);
     this.inputSwitch.cancel();
     coordinateChatPageHidden({
       stopScrollActivity: (): void => { setScrollActive(false); },
@@ -3251,6 +3260,7 @@ export struct ChatPage {
   }
 
   private handleShown(): void {
+    AppStorage.setOrCreate<boolean>(KEY_CHAT_DETAIL_SHOWN, true);
     // 回到这一页（或者退场被取消了）：放开停车闸，头像该动的继续动。
     parkSenderAnimations(false);
     this.videoPrefetch.resume();
@@ -3639,6 +3649,7 @@ export struct ChatPage {
       return;
     }
     this.stickerSetSheetId = setId;
+    this.stickerSetSheetMounted = true;
     this.stickerSetSheetOpen = true;
     // 登记给返回键（见 util/sheetDismissStack）。onDisappear 里注销。
     this.stickerSheetOff = pushSheetDismiss((): void => {
@@ -3664,7 +3675,8 @@ export struct ChatPage {
   @Builder
   private stickerSetSheet() {
     // 每次打开都重建：合集内容与"已添加"状态都得重新问一遍服务端。
-    if (this.stickerSetSheetOpen) {
+    // 判据用 mounted 而不是 open：收起动画期间内容要保持，否则是白抽屉。
+    if (this.stickerSetSheetMounted) {
       StickerSetSheet({
         setId: this.stickerSetSheetId,
         onPick: (item: StickerSetItem): void => {
@@ -6418,6 +6430,7 @@ export struct ChatPage {
       dragBar: false,
       blurStyle: containerBlur('dialog'), systemMaterial: overlayMaterial('dialog'),
       onDisappear: (): void => {
+        this.stickerSetSheetMounted = false;
         this.stickerSetSheetId = '';
         if (this.stickerSheetOff !== null) {
           this.stickerSheetOff();
@@ -6464,6 +6477,10 @@ export struct ChatPage {
     // 下面三条对应迁移前的 onPageShow / onPageHide / onBackPress，方法体一字未动：
     // onBackPress 返回 true「已处理不返回」与 onBackPressed 返回 true「重写返回键
     // 不出栈」语义等价。
+    // onWillShow + onShown 都写 true：整页 router 页退回来时 onShown 可能不补发，
+    // 而真正的显示一定会走 onWillShow。幽灵页（栈里有、屏上没有）两个都不会走，
+    // 标志停在 false，dock 判据据此把它按栈空处理。
+    .onWillShow((): void => { AppStorage.setOrCreate<boolean>(KEY_CHAT_DETAIL_SHOWN, true); })
     .onShown((): void => { this.handleShown(); })
     .onWillHide((): void => { this.handleWillHide(); })
     .onHidden((): void => { this.handleHidden(); })

@@ -13,7 +13,8 @@ import { navigateToSetting } from '../../util/settingsNav';
 import { appWallpaperActive } from '../../util/localWallpaper';
 import { DOCK_MODE_LEFT_FLOATING } from '../../util/splitMetrics';
 import { NavStackLike, TabKind, stackOf } from '../../util/navStacks';
-import { dockVisibleForTab } from '../../util/navBarReset';
+import { dockVisibleForTab, effectiveChatDepth, KEY_CHAT_DETAIL_SHOWN } from '../../util/navBarReset';
+import { CHAT_NAV_BAR_REPORTED_KEY } from '../chatlist/ChatListPage';
 import { KEY_CHAT_VIEWER_COVERS_WINDOW } from '../../util/viewerWindowCover';
 import { router } from '@kit.ArkUI';
 import { getTdClient, getUnreadCountStore, getCallSession, getChatStore, getChatThemeStore } from '../../tdkit/Globals';
@@ -62,7 +63,7 @@ import { DOCK_SIDE_PADDING, dockSidePadding } from '../../util/mainTabsWidth';
 import { publishTabReTap } from '../../util/tabReTap';
 import { KEY_SHOW_CONTACTS_TAB } from '../../store/AppSettings';
 import { materialModifier, materialModifierWhen } from '../../util/materialModifier';
-import { logE } from '../../util/log';
+import { logE, logW } from '../../util/log';
 import { TD_ACCOUNT_SWITCHING, TdAccountSummary, accountRegistry } from '../../tdkit/AccountRegistry';
 import { PopupRect, accountPopupRect, accountRowAt } from '../../util/accountSwitchLayout';
 import { switchAccountOrToast } from '../../util/accountSwitch';
@@ -88,6 +89,7 @@ const MINI_COVER: number = 34;
 // 底距。一路试下来：bottomSafe + 12（太远）→ max(8, bottomSafe)（还是远）→
 // 半个 bottomSafe（太低）→ 现在取七成，落在后两者中间。别再往下：底部那条是
 // 系统的返回/主页手势带，胶囊下沿贴太近，下半截的点击会被系统先吃掉。
+
 const DOCK_GAP: number = 6;     // minimum gap below the capsule
 const DOCK_ITEM_INSET: number = 5;
 const DOCK_SWITCH_DURATION: number = 240;
@@ -270,6 +272,11 @@ export struct MainScreen {
     // 所以对齐必须在这里显式做一次。appliedTab 一并跟上，否则 select() 的
     // 去重基准从一开始就是错的。
     this.appliedTab = this.tab;
+    // 这棵树不只冷启动建一次：从整页 router 页（应用内浏览器、小程序）返回时
+    // 也会重建。重建后各页签的 navBar 标志要等它们再次上报才更新，中间这段时间
+    // dock 只能按旧值渲染——用户报的"看过网页回来 dock 没了"就是这个窗口。
+    // 这里按真实栈深先算一次，上报回调随后只会再确认一遍。
+    this.syncDock();
     // 已登录才查更新（MainScreen 只在登录后渲染），内部按 6 小时节流。
     updateChecker.check(false).catch((): void => {});
     // 背景（尤其是图案）要下载并解压 .tgv，放到开会话时做就是点击到首帧之间
@@ -743,16 +750,31 @@ export struct MainScreen {
     if (kind === null) {
       return true;
     }
-    if (kind === 'chat' && this.chatViewerCoversWindow &&
-      isSplitByBreakpoint(this.widthBp, this.heightBp, this.forceSingleColumn, this.windowPortrait)) {
+    const split: boolean = isSplitByBreakpoint(
+      this.widthBp, this.heightBp, this.forceSingleColumn, this.windowPortrait);
+    if (kind === 'chat' && this.chatViewerCoversWindow && split) {
       return false;
     }
+    // 两个条件缺一不可：框架上报 navBar 可见 + 详情页确实不在屏上。
+    //
+    // 只凭上报会踩老 bug——整页路由退回来时框架会补发 visible=true，而那时详情页
+    // 是真在屏上的，dock 会冒出来盖住输入框；只凭详情页标志又会漏掉这次的幽灵
+    // 目的地（栈里有 ChatPage、屏上是列表）。两个信号各自都不足以判定。
+    if (kind === 'chat'
+      && (AppStorage.get<boolean>(CHAT_NAV_BAR_REPORTED_KEY) ?? false)
+      && !(AppStorage.get<boolean>(KEY_CHAT_DETAIL_SHOWN) ?? false)) {
+      return true;
+    }
     const stack: NavStackLike | undefined = stackOf(kind);
-    return dockVisibleForTab(
-      isSplitByBreakpoint(this.widthBp, this.heightBp, this.forceSingleColumn, this.windowPortrait),
-      stack === undefined ? undefined : stack.size(),
-      this.storedNavBarFlag(this.tab)
-    );
+    if (stack === undefined) {
+      return dockVisibleForTab(split, undefined, this.storedNavBarFlag(this.tab));
+    }
+    // 栈深还要和「详情页是否真的在屏上」一起看：整页路由退回来时会留下残留栈项，
+    // 只看栈深会让 dock 永久藏着（见 util/navBarReset.effectiveChatDepth）。
+    const detailShown: boolean = kind !== 'chat'
+      || (AppStorage.get<boolean>(KEY_CHAT_DETAIL_SHOWN) ?? false);
+    return dockVisibleForTab(split, effectiveChatDepth(stack.size(), detailShown),
+      this.storedNavBarFlag(this.tab));
   }
 
   // Floating capsule: outer Column carries the horizontal padding + bottom
@@ -1183,6 +1205,10 @@ export struct MainScreen {
       // 所以胶囊在左栏里居中；外层 Stack 是 BottomStart 对齐，整条贴在左下。
       // 这里用 if 只随分栏/不分栏切换，进出目的页的显隐仍走 dock() 自己的
       // opacity / enabled / visibility（下面那段说明的就是那件事）。
+      // 底部边缘淡化已下放到列表容器本身（见 pages/chatlist/MainTabBody.ets 与
+      // ChatListView.ets 列表容器上的 linearGradientBlur）。这里原来是全屏一条 Column + backdropBlur：它既盖住了底部
+      // 胶囊（把胶囊糊成一片），又因为 position 的 calc 失效被画到屏幕顶部去糊标题。
+      // 渐隐属于可滚动内容，就该画在列表里、只糊列表自己，不在屏幕层压任何东西。
       if (this.leftFloatingDock()) {
         this.dock();
       }

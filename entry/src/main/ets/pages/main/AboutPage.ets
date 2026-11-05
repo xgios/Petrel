@@ -10,6 +10,7 @@ import { str } from '../../util/strings';
 import { LANGUAGE_EPOCH } from '../../util/appLanguage';
 import { logE } from '../../util/log';
 import { HdsSubDestination } from '../common/HdsSubDestination';
+import { BLUR_MAX_VP, EDGE_OVERLAY_VP, topEdgeBlurStops } from '../../util/scrollEdgeBlur';
 
 const CARD_BG: ResourceColor = $r('app.color.surface');
 const CARD_RADIUS: number = 14;
@@ -26,6 +27,8 @@ export function AboutPageBuilder(): void {
 @Component
 export struct AboutPage {
   private hdsScroller: Scroller = new Scroller();
+  // 滚动区实测高度（vp）：linearGradientBlur 的 fractionStops 按实际高度归一化。
+  @State private blurViewH: number = 0;
   @StorageProp(LANGUAGE_EPOCH) langEpoch: number = 0;
   @StorageProp('topSafeHeight') topSafe: number = 0;
   @StorageProp('bottomSafeHeight') bottomSafe: number = 0;
@@ -111,6 +114,22 @@ export struct AboutPage {
     .onClick(onTap);
   }
 
+  // 鸣谢的一行：圆形头像 + 昵称。头像是随包资源，不依赖网络。
+  @Builder
+  creditRow(avatar: Resource, name: string) {
+    Row({ space: 12 }) {
+      Image(avatar)
+        .width(34).height(34).borderRadius(17)
+        .objectFit(ImageFit.Cover).draggable(false);
+      Text(name)
+        .fontSize(16).fontWeight(FontWeight.Medium).fontColor(COLOR_TEXT_PRIMARY)
+        .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1);
+    }
+    .width('100%').height(56)
+    .padding({ left: 14, right: 14 });
+  }
+
   // 发布说明按块渲染。整段纯文本会把 ## 和 ** 原样显示出来，很难看。
   @Builder
   noteBlock(block: MdBlock) {
@@ -192,6 +211,23 @@ export struct AboutPage {
           .width('100%')
           .backgroundColor(CARD_BG).borderRadius(CARD_RADIUS);
 
+          Column({ space: 0 }) {
+            Row({ space: 8 }) {
+              SymbolGlyph($r('sys.symbol.heart'))
+                .fontSize(15).fontColor([COLOR_PRIMARY]);
+              Text($r('app.string.settings_about_credits'))
+                .fontSize(13).fontWeight(FontWeight.Medium).fontColor(COLOR_TEXT_PRIMARY)
+                .layoutWeight(1);
+            }
+            .width('100%').padding({ left: 14, right: 14, top: 12, bottom: 4 });
+            // 昵称是专有名词，不进翻译目录。
+            this.creditRow($r('app.media.credit_bailin'), 'Bailin'); // i18n-exempt: 用户昵称
+            Divider().color($r('app.color.divider')).strokeWidth(0.7).margin({ left: 60 });
+            this.creditRow($r('app.media.credit_haibianbao'), '海绵宝'); // i18n-exempt: 用户昵称
+          }
+          .width('100%').padding({ bottom: 6 })
+          .backgroundColor(CARD_BG).borderRadius(CARD_RADIUS);
+
           if (this.noteBlocks.length > 0) {
             Column({ space: 7 }) {
               Row({ space: 8 }) {
@@ -216,12 +252,23 @@ export struct AboutPage {
             .padding({ top: 8 });
         }
         .width('100%')
-        .padding({ left: 12, right: 12, bottom: this.bottomSafe + 24 });
+        .padding({ left: 12, right: 12, top: EDGE_OVERLAY_VP, bottom: this.bottomSafe + 24 });
       }
       .layoutWeight(1).width('100%').align(Alignment.Top)
       .scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring)
       // 不裁剪，内容才能穿到标题栏底下——渐变模糊模糊的正是这部分。
-      .clip(false);
+      .clip(false)
+      // 边缘渐变虚化：与设置页/首页同一套参数（顶/底 118vp、峰 22px）。
+      .linearGradientBlur(BLUR_MAX_VP, {
+        fractionStops: topEdgeBlurStops(this.blurViewH),
+        direction: GradientDirection.Bottom
+      })
+      .onAreaChange((_old: Area, area: Area): void => {
+        const h: number = Number(area.height);
+        if (h > 0 && Math.abs(h - this.blurViewH) > 0.5) {
+          this.blurViewH = h;
+        }
+      });
     }
     }
     .width('100%').height('100%')

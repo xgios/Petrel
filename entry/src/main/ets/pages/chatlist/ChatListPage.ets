@@ -5,6 +5,7 @@ import { TelegramQrScanner } from '../../services/TelegramQrScanner';
 import { SCOPE_MUTE_EPOCH } from '../../store/ScopeMuteStore';
 import { chatListInForeground, chatListPageCanRun } from './ChatListFreeze';
 import { KEY_IMMERSIVE_BARS_HIDDEN } from '../../util/immersiveBars';
+import { effectiveChatDepth, KEY_CHAT_DETAIL_SHOWN } from '../../util/navBarReset';
 import {
   BreakpointType, HEIGHT_BP_LG, KEY_HEIGHT_BREAKPOINT, KEY_WINDOW_PORTRAIT, KEY_WIDTH_BREAKPOINT, WIDTH_BP_SM,
   isSmallSquare, isSplitByBreakpoint
@@ -52,7 +53,7 @@ import {
 } from '../../util/folderBarCollapse';
 import { registerStack, NavStackLike } from '../../util/navStacks';
 import { splitNavMinWidth, splitNavMaxWidth, splitContentMinWidth } from '../../util/splitMetrics';
-import { mainBarFill, mainPageFill } from '../../util/theme';
+import { mainPageFill } from '../../util/theme';
 import { KEY_APP_BG_ON } from '../../store/AppSettings';
 import { SHEET_LIFECYCLE_MODIFIER } from '../../util/navSheetLifecycle';
 import { SplitPlaceholderHolder } from '../../util/splitPlaceholderHolder';
@@ -226,6 +227,10 @@ export const NAV_BAR_WIDTH_KEY: string = 'navBarWidth';
 // （含系统返回手势）的信号。默认 true：回调没来（或本页尚未挂树）时退化成
 // 「dock 照常显示」，也就是修复前的行为，不会把 dock 弄丢。
 export const CHAT_NAV_BAR_VISIBLE_KEY: string = 'chatNavBarVisible';
+// 框架自己上报的 navBar 可见性（未经我们按栈深修正）。整页 router 页退出来之后，
+// 栈里会留下幽灵目的地，而这份上报反映的是 Navigation 此刻到底在铺 navBar 还是
+// 铺目的地——dock 判据需要它当地面真值。
+export const CHAT_NAV_BAR_REPORTED_KEY: string = 'chatNavBarReported';
 
 // 分栏且右栏栈空时的占位。官方明确它仅在分栏模式下展示、不受路由栈管理、
 // 不可获焦、不响应事件，是纯展示层；单栏模式（手机）下永远不出现。
@@ -582,8 +587,15 @@ export struct ChatListPage {
       this.getUIContext().postFrameCallback(new FolderChipAnchorFrameCallback(this));
     }
     this.applyNavBarVisible(navBarVisibleOnAppear(
-      isSplitByBreakpoint(this.widthBp, this.heightBp, this.forceSingleColumn, this.windowPortrait), this.chatStack.size()) &&
+      isSplitByBreakpoint(this.widthBp, this.heightBp, this.forceSingleColumn, this.windowPortrait),
+      effectiveChatDepth(this.chatStack.size(), this.chatDetailShown())) &&
       !this.viewerHidesNavBar());
+  }
+
+  // 会话详情页是否真的在屏上（由 ChatPage 的 onShown/onHidden 写）。栈里留着
+  // 一条记录但详情页已经不在屏上时，栈深不可信，见 util/navBarReset。
+  private chatDetailShown(): boolean {
+    return AppStorage.get<boolean>(KEY_CHAT_DETAIL_SHOWN) ?? true;
   }
 
   // 只在分栏时生效：单栏（手机）下 navBar 本来就被会话页整页盖住，不需要这一手。
@@ -617,7 +629,8 @@ export struct ChatListPage {
     // 写 true 就把 dock 放了出来，和输入框叠在一起（用户报的正是这个）。
     // 判据见 util/navBarReset。
     this.navBarVisible = navBarVisibleOnAppear(
-      isSplitByBreakpoint(this.widthBp, this.heightBp, this.forceSingleColumn, this.windowPortrait), this.chatStack.size());
+      isSplitByBreakpoint(this.widthBp, this.heightBp, this.forceSingleColumn, this.windowPortrait),
+      effectiveChatDepth(this.chatStack.size(), this.chatDetailShown()));
     AppStorage.setOrCreate<boolean>(CHAT_NAV_BAR_VISIBLE_KEY, this.navBarVisible);
     this.listRenderActive = chatListPageCanRun(this.pageActive, this.navBarVisible);
     setChatListRenderActive(this.listRenderActive);
@@ -1249,7 +1262,16 @@ export struct ChatListPage {
     const options: HdsNavigationTitleBarOptions = {
       avoidLayoutSafeArea: true,
       enableComponentSafeArea: true,
-      style: titleBarStyle(mainBarFill(this.appWallpaperOn), this.accent()),
+      // 【顶栏去雾】不再用 mainBarFill 那层半透明白，也不再开 HDS 的滚动渐变模糊
+      // （scrollEffect=false）。那两项合起来就是用户说的「顶部淡化和白雾」：内容一滑
+      // 到标题栏底下，HDS 就按滚动量爬升模糊并换背板，而白色的行底被糊开、再叠一层
+      // #33FFFFFF，顶部就成了一片发白发虚的带子。现在背板全透明、模糊关掉，列表
+      // 滚上去就是它本来的样子。会话页（ChatPage:6126）早就是这个写法。
+      // 2026-11-01：材质/blurStrategy 的猜测已排除——手机上标题糊掉的真正原因是
+      // MainScreen 那条「底部边缘淡化」用 calc 定位失效、被画到了屏幕顶部
+      // （它的 backdropBlur(18) 正好压在标题栏上）。那里修好后这条栏不必摘材质，
+      // 仍按 titleBarStyle(..., false) 走：透明背板 + 关掉滚动渐变模糊。
+      style: titleBarStyle(Color.Transparent, this.accent(), false, false),
       content: content
     };
     this.titleBarOptionsCache = options;
@@ -1870,9 +1892,11 @@ export struct ChatListPage {
       // CHAT_NAV_BAR_VISIBLE_KEY 的说明。写入前先比一次：同值 setOrCreate 也会
       // 惊动订阅方，而这个回调在单双栏切换时会连着来几次。
       .onNavBarStateChange((reported: boolean): void => {
+        AppStorage.setOrCreate<boolean>(CHAT_NAV_BAR_REPORTED_KEY, reported);
         // 应用内浏览器退掉时会补发 visible=true 而栈里还有详情页，按栈兜底。见 navBarReset。
         this.applyNavBarVisible(navBarVisibleOnChange(reported,
-          isSplitByBreakpoint(this.widthBp, this.heightBp, this.forceSingleColumn, this.windowPortrait), this.chatStack.size()) &&
+          isSplitByBreakpoint(this.widthBp, this.heightBp, this.forceSingleColumn, this.windowPortrait),
+          effectiveChatDepth(this.chatStack.size(), this.chatDetailShown())) &&
           !this.viewerHidesNavBar());
       })
       .enableDragBar(true)

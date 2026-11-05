@@ -13399,6 +13399,38 @@
     {
       "name": "ds_reset_auto_download_confirm",
       "value": "撤消全部自定义自动下载设置"
+    },
+    {
+      "name": "ttl_badge_sec",
+      "value": "秒"
+    },
+    {
+      "name": "ttl_badge_min",
+      "value": "分"
+    },
+    {
+      "name": "ttl_badge_hour",
+      "value": "时"
+    },
+    {
+      "name": "ttl_badge_day",
+      "value": "天"
+    },
+    {
+      "name": "ttl_badge_week",
+      "value": "周"
+    },
+    {
+      "name": "ttl_badge_month",
+      "value": "月"
+    },
+    {
+      "name": "ttl_badge_year",
+      "value": "年"
+    },
+    {
+      "name": "settings_about_credits",
+      "value": "鸣谢"
     }
   ]
 }
