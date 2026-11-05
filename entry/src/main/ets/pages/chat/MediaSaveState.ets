@@ -107,8 +107,23 @@ import {
 import { openLocalFile } from '../../util/openLocalFile';
 import { fileOpenMimeType } from '../../util/fileMessage';
 import { autosaveEnabled } from '../../store/AppSettings';
+import { subscribeThumbPath, thumbPathFor } from '../../util/mediaThumbChannel';
 import { str } from '../../util/strings';
 import { logE } from '../../util/log';
+
+function resolvedFullPhotoPath(e: MessageEntry): string {
+  if (e.photoFullPath !== '') {
+    return e.photoFullPath;
+  }
+  return e.photoFullFileId !== 0 ? thumbPathFor(e.photoFullFileId) : '';
+}
+
+function resolvedInlinePhotoPath(e: MessageEntry): string {
+  if (e.photoPath !== '') {
+    return e.photoPath;
+  }
+  return e.photoFileId !== 0 ? thumbPathFor(e.photoFileId) : '';
+}
 
 // 宿主（ChatPage）暴露给控制器的那一小片接口，全是箭头函数字段——取值器读
 // 页面当下的真值，本类不缓存。仿 AttachActions 的 AttachActionsHost。
@@ -138,10 +153,12 @@ export class MediaSaveState {
   // 查看器"保存到相册"单槽等待句柄 + 其进度通知。
   private pendingGallerySaveId: number = 0;
   private pendingGallerySaveProgress: DownloadSaveNotification | null = null;
+  private pendingGalleryThumbUnsub: (() => void) | null = null;
   // 新消息自动保存到相册的队列 + in-flight 闸门。
   private autoSavePendingIds: number[] = [];
   // 多选保存（issue #199）手动排进相册队列的 id：这些不受「只存收到的」限制。
   private manualGalleryIds: Set<number> = new Set<number>();
+  private autoSaveThumbUnsubs: Map<number, () => void> = new Map<number, () => void>();
   private autoSaveInFlight: boolean = false;
   // 文档下载后自动打开的等待句柄 + in-flight 闸门。
   private pendingFileOpenId: number = 0;
@@ -209,6 +226,7 @@ export class MediaSaveState {
           });
           return;
         }
+        this.clearPendingGalleryThumbUnsub();
         this.pendingGallerySaveProgress?.dispose();
         this.pendingGallerySaveProgress =
           new DownloadSaveNotification(displayName, e.videoFileId);
@@ -221,8 +239,9 @@ export class MediaSaveState {
       }
       return;
     }
-    if (e.photoFullPath !== '') {
-      this.saveMediaTo(ctx, e.photoFullPath, false, '', toFiles,
+    const fullPath: string = resolvedFullPhotoPath(e);
+    if (fullPath !== '') {
+      this.saveMediaTo(ctx, fullPath, false, '', toFiles,
         toFiles ? undefined : new DownloadSaveNotification(str('storage_photo')));
       return;
     }
@@ -235,10 +254,12 @@ export class MediaSaveState {
         });
         return;
       }
+      this.clearPendingGalleryThumbUnsub();
       this.pendingGallerySaveProgress?.dispose();
       this.pendingGallerySaveProgress =
         new DownloadSaveNotification(str('storage_photo'), e.photoFullFileId);
       this.pendingGallerySaveId = e.id;
+      this.armPendingGalleryThumbSub(e.id, e.photoFullFileId);
       const store = this.host.store();
       if (store !== null) {
         store.requestFullPhoto(e.id, e.photoFullFailed);
@@ -246,12 +267,81 @@ export class MediaSaveState {
       promptAction.showToast({ message: $r('app.string.cp_photo_downloading_save'), duration: 2200 });
       return;
     }
-    if (e.photoPath !== '') {
-      this.saveMediaTo(ctx, e.photoPath, false, '', toFiles,
+    const inlinePath: string = resolvedInlinePhotoPath(e);
+    if (inlinePath !== '') {
+      this.saveMediaTo(ctx, inlinePath, false, '', toFiles,
         toFiles ? undefined : new DownloadSaveNotification(str('storage_photo')));
-    } else {
-      promptAction.showToast({ message: $r('app.string.cp_photo_not_available'), duration: 1800 });
+      return;
     }
+    if (e.photoFileId !== 0) {
+      if (toFiles) {
+        downloadSaveService.saveRemoteFile(
+          ctx, e.photoFileId, this.host.chatId(), e.id, str('storage_photo'));
+        promptAction.showToast({
+          message: $r('app.string.cp_photo_downloading_save'), duration: 2200
+        });
+        return;
+      }
+      this.clearPendingGalleryThumbUnsub();
+      this.pendingGallerySaveProgress?.dispose();
+      this.pendingGallerySaveProgress =
+        new DownloadSaveNotification(str('storage_photo'), e.photoFileId);
+      this.pendingGallerySaveId = e.id;
+      this.armPendingGalleryThumbSub(e.id, e.photoFileId);
+      const store = this.host.store();
+      if (store !== null) {
+        store.requestFullPhoto(e.id, e.photoFailed);
+      }
+      promptAction.showToast({ message: $r('app.string.cp_photo_downloading_save'), duration: 2200 });
+      return;
+    }
+    promptAction.showToast({ message: $r('app.string.cp_photo_not_available'), duration: 1800 });
+  }
+
+  private clearPendingGalleryThumbUnsub(): void {
+    if (this.pendingGalleryThumbUnsub !== null) {
+      const unsub = this.pendingGalleryThumbUnsub;
+      this.pendingGalleryThumbUnsub = null;
+      unsub();
+    }
+  }
+
+  private armPendingGalleryThumbSub(messageId: number, fileId: number): void {
+    this.clearPendingGalleryThumbUnsub();
+    if (fileId === 0) {
+      return;
+    }
+    this.pendingGalleryThumbUnsub = subscribeThumbPath(fileId, (landedPath: string): void => {
+      if (landedPath === '' || this.pendingGallerySaveId !== messageId) {
+        return;
+      }
+      this.clearPendingGalleryThumbUnsub();
+      this.pendingGallerySaveId = 0;
+      const progress: DownloadSaveNotification | undefined =
+        this.pendingGallerySaveProgress ?? undefined;
+      this.pendingGallerySaveProgress = null;
+      this.saveMediaTo(this.host.context(), landedPath, false, '', false, progress);
+    });
+  }
+
+  private clearAutoSaveThumbUnsubs(): void {
+    this.autoSaveThumbUnsubs.forEach((unsub: () => void): void => { unsub(); });
+    this.autoSaveThumbUnsubs.clear();
+  }
+
+  private watchAutoSaveThumb(fileId: number): void {
+    if (fileId === 0 || this.autoSaveThumbUnsubs.has(fileId)) {
+      return;
+    }
+    const unsub: () => void = subscribeThumbPath(fileId, (_landed: string): void => {
+      const existing: (() => void) | undefined = this.autoSaveThumbUnsubs.get(fileId);
+      if (existing !== undefined) {
+        this.autoSaveThumbUnsubs.delete(fileId);
+        existing();
+      }
+      this.processAutomaticGallerySave(this.host.latestMessages());
+    });
+    this.autoSaveThumbUnsubs.set(fileId, unsub);
   }
 
   private processAutomaticGallerySave(list: MessageEntry[]): void {
@@ -274,13 +364,22 @@ export class MediaSaveState {
         }
         if (entry.videoPath !== '') { target = entry; path = entry.videoPath; video = true; break; }
       } else {
-        if (entry.photoFullFailed) {
+        const fullFailed: boolean = entry.photoFullFileId !== 0
+          ? entry.photoFullFailed : entry.photoFailed;
+        if (fullFailed) {
           this.autoSavePendingIds = this.autoSavePendingIds.filter((id: number): boolean => id !== messageId);
           continue;
         }
-        if (entry.photoFullPath !== '') { target = entry; path = entry.photoFullPath; break; }
-        if (entry.photoFullFileId === 0 && entry.photoPath !== '') {
-          target = entry; path = entry.photoPath; break;
+        const fullPath: string = resolvedFullPhotoPath(entry);
+        const inlinePath: string = resolvedInlinePhotoPath(entry);
+        if (fullPath !== '') { target = entry; path = fullPath; break; }
+        if (entry.photoFullFileId === 0) {
+          if (inlinePath !== '') {
+            target = entry; path = inlinePath; break;
+          }
+          if (entry.photoFileId !== 0) {
+            this.watchAutoSaveThumb(entry.photoFileId);
+          }
         }
       }
     }
@@ -392,8 +491,10 @@ export class MediaSaveState {
         if (m.videoPath === '') {
           store.requestVideoDownload(item.id, true, m.videoFailed);
         }
-      } else if (m.photoFullFileId !== 0 && m.photoFullPath === '') {
+      } else if (m.photoFullFileId !== 0 && resolvedFullPhotoPath(m) === '') {
         store.requestFullPhoto(item.id, m.photoFullFailed);
+      } else if (m.photoFullFileId === 0 && m.photoFileId !== 0 && resolvedInlinePhotoPath(m) === '') {
+        store.requestFullPhoto(item.id, m.photoFailed);
       }
     }
     this.processAutomaticGallerySave(this.host.latestMessages());
@@ -464,18 +565,26 @@ export class MediaSaveState {
           this.pendingGallerySaveProgress?.downloadFailed();
           this.pendingGallerySaveProgress = null;
           promptAction.showToast({ message: $r('app.string.cp_video_download_failed'), duration: 1800 });
-        } else if (mediaEntryIsPhoto(pe) && pe.photoFullPath !== '') {
-          this.pendingGallerySaveId = 0;
-          const progress: DownloadSaveNotification | undefined =
-            this.pendingGallerySaveProgress ?? undefined;
-          this.pendingGallerySaveProgress = null;
-          this.saveMediaTo(this.host.context(), pe.photoFullPath, false,
-            '', false, progress);
-        } else if (mediaEntryIsPhoto(pe) && pe.photoFullFailed) {
-          this.pendingGallerySaveId = 0;
-          this.pendingGallerySaveProgress?.downloadFailed();
-          this.pendingGallerySaveProgress = null;
-          promptAction.showToast({ message: $r('app.string.cp_photo_download_failed'), duration: 1800 });
+        } else if (mediaEntryIsPhoto(pe)) {
+          const landedPhotoPath: string = pe.photoFullFileId !== 0
+            ? resolvedFullPhotoPath(pe) : resolvedInlinePhotoPath(pe);
+          const photoFailed: boolean = pe.photoFullFileId !== 0
+            ? pe.photoFullFailed : pe.photoFailed;
+          if (landedPhotoPath !== '') {
+            this.clearPendingGalleryThumbUnsub();
+            this.pendingGallerySaveId = 0;
+            const progress: DownloadSaveNotification | undefined =
+              this.pendingGallerySaveProgress ?? undefined;
+            this.pendingGallerySaveProgress = null;
+            this.saveMediaTo(this.host.context(), landedPhotoPath, false,
+              '', false, progress);
+          } else if (photoFailed) {
+            this.clearPendingGalleryThumbUnsub();
+            this.pendingGallerySaveId = 0;
+            this.pendingGallerySaveProgress?.downloadFailed();
+            this.pendingGallerySaveProgress = null;
+            promptAction.showToast({ message: $r('app.string.cp_photo_download_failed'), duration: 1800 });
+          }
         }
       }
     }
@@ -502,6 +611,8 @@ export class MediaSaveState {
   // musicQueue.reset() 那一句）——见文件头「dispose() 的 8 行 vs 7 行」
   // 一节，逐字对应，不新增（本簇没有定时器句柄可清）、不少做。
   dispose(): void {
+    this.clearPendingGalleryThumbUnsub();
+    this.clearAutoSaveThumbUnsubs();
     this.pendingGallerySaveId = 0;
     this.pendingGallerySaveProgress?.dispose();
     this.pendingGallerySaveProgress = null;

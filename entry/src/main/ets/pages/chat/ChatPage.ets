@@ -1,5 +1,11 @@
 import { ChatTimelineBindings, ChatTimelineSession } from './ChatTimelineSession';
-import { subscribeVideoPreload } from '../../util/videoPreloadSetting';
+import {
+  KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE,
+  autoDownloadVideoPreloadBytes,
+  shouldAutoDownloadVideoInScope,
+  shouldPreloadLargeVideo,
+  subscribeAutoDownloadChanged
+} from '../../util/autoDownloadPolicy';
 import { initVideoPosterStore } from '../../util/videoPosterStore';
 import { collapseFloatingVideo } from '../../util/floatingVideoRuntime';
 import { ChatDropReceiver } from './ChatDropReceiver';
@@ -1937,8 +1943,26 @@ export struct ChatPage {
       isChannel: (): boolean => this.isChannel,
       setMembershipState: (next: string): void => { this.membershipState = next; },
       setRestrictedUntil: (value: number): void => { this.membershipRestrictedUntil = value; },
-      setIsGroup: (value: boolean): void => { this.isGroup = value; },
-      setIsChannel: (value: boolean): void => { this.isChannel = value; },
+      setIsGroup: (value: boolean): void => {
+        const changed: boolean = this.isGroup !== value;
+        this.isGroup = value;
+        if (changed) {
+          this.videoPrefetch.onPolicyChanged(
+            shouldAutoDownloadVideoInScope(this.isGroup, this.isChannel) &&
+            (AppStorage.get<boolean>(KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE) ?? true)
+          );
+        }
+      },
+      setIsChannel: (value: boolean): void => {
+        const changed: boolean = this.isChannel !== value;
+        this.isChannel = value;
+        if (changed) {
+          this.videoPrefetch.onPolicyChanged(
+            shouldAutoDownloadVideoInScope(this.isGroup, this.isChannel) &&
+            (AppStorage.get<boolean>(KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE) ?? true)
+          );
+        }
+      },
       commitTimelineSnapshot: (): void => { this.timeline.commitTimelineSnapshot(); },
       setJoiningChat: (value: boolean): void => { this.joiningChat = value; },
       setJoinByRequest: (value: boolean): void => { this.joinByRequest = value; },
@@ -1998,7 +2022,15 @@ export struct ChatPage {
         }
         // 预取查看器「自动」点开要播的那一档（多清晰度，见 util/entryVideoVariant）。
         const f = entryPrefetchFile(m, AppStorage.get<string>(KEY_CURRENT_NETWORK_TYPE) ?? 'other');
-        return f !== null ? { fileId: f.fileId, fileSize: f.fileSize, local: f.local } : null;
+        if (f === null) {
+          return null;
+        }
+        return {
+          fileId: f.fileId,
+          fileSize: f.fileSize,
+          local: f.local,
+          preloadAllowed: shouldPreloadLargeVideo(this.isGroup, this.isChannel, m.videoFileSize)
+        };
       },
       // store 还没就绪就当作已被认领：宁可不预取，也别夹了别人的下载。
       // 查看器当前那条的视频也算已认领：它的流式下载走 VideoStreamSession 自己的
@@ -2007,15 +2039,31 @@ export struct ChatPage {
         (this.store?.isVideoFileClaimed(fileId) ?? true) ||
         this.timeline.messages.some((e: MessageEntry): boolean =>
           e.id === this.viewer.viewerMsgId && entryOwnsVideoFile(e, fileId)),
-      subscribeEnabled: subscribeVideoPreload,
+      subscribeEnabled: (listener: (enabled: boolean) => void): () => void => {
+        const currentEnabled = (): boolean =>
+          shouldAutoDownloadVideoInScope(this.isGroup, this.isChannel) &&
+          (AppStorage.get<boolean>(KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE) ?? true);
+        listener(currentEnabled());
+        return subscribeAutoDownloadChanged((): void => {
+          this.videoPrefetch.onPolicyChanged(currentEnabled());
+        });
+      },
       subscribeNetwork: subscribeNetworkType,
       network: (): string => AppStorage.get<string>(KEY_CURRENT_NETWORK_TYPE) ?? 'other',
-      powerSaving: (): boolean => powerSavingActive()
+      powerSaving: (): boolean => powerSavingActive(),
+      headBytes: (fileSize: number): number => autoDownloadVideoPreloadBytes(fileSize)
     });
     this.playSlot.bind({
-      // 按小窗实际要下的那一档算（多清晰度：有低清档的大视频不该被原片大小挡掉）。
-      sizeAllowed: (messageId: number): boolean => autoplaySizeAllowed(
-        entryInlineSize(this.findMsg(messageId)), AppStorage.get<number>(KEY_AUTOPLAY_MAX_MB) ?? 0),
+      // 普通视频必须已完成本地完整下载（videoPath !== ''）才参与气泡内自动播放；
+      // 未下载完或仅分片预加载的视频保持封面 + 左上角下载胶囊 + 中间播放按钮。
+      sizeAllowed: (messageId: number): boolean => {
+        const m = this.findMsg(messageId);
+        if (m !== null && !m.isAnimation && m.videoPath === '') {
+          return false;
+        }
+        return autoplaySizeAllowed(
+          entryInlineSize(m), AppStorage.get<number>(KEY_AUTOPLAY_MAX_MB) ?? 0);
+      },
       viewerMsgId: (): number => this.viewer.viewerMsgId,
       pageVisible: (): boolean => this.timeline.pageVisible,
       competeEnabled: (): boolean => this.playSlotsEnabled(),

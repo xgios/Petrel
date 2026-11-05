@@ -13327,6 +13327,78 @@
     {
       "name": "cp_search_results",
       "value": "Search results"
+    },
+    {
+      "name": "ds_auto_download_media",
+      "value": "Auto-Download Media"
+    },
+    {
+      "name": "ds_auto_download_photos",
+      "value": "Photos"
+    },
+    {
+      "name": "ds_auto_download_all_on",
+      "value": "Enabled for all chats"
+    },
+    {
+      "name": "ds_auto_download_all_off",
+      "value": "Disabled for all chats"
+    },
+    {
+      "name": "ds_auto_download_private",
+      "value": "Private Chats"
+    },
+    {
+      "name": "ds_auto_download_group",
+      "value": "Groups"
+    },
+    {
+      "name": "ds_auto_download_channel",
+      "value": "Channels"
+    },
+    {
+      "name": "ds_auto_download_videos",
+      "value": "Videos"
+    },
+    {
+      "name": "ds_auto_download_video_all_max",
+      "value": "Up to %1$s for all chats"
+    },
+    {
+      "name": "ds_auto_download_video_scopes_max",
+      "value": "Up to %2$s in %1$s"
+    },
+    {
+      "name": "ds_video_size_limit",
+      "value": "Size Limit"
+    },
+    {
+      "name": "ds_video_preload_large",
+      "value": "Preload Large Videos"
+    },
+    {
+      "name": "ds_video_preload_size",
+      "value": "Preload Size"
+    },
+    {
+      "name": "ds_video_preload_large_hint",
+      "value": "Preload the first few seconds (%2$s) of videos larger than %1$s for instant playback."
+    },
+    {
+      "name": "ds_auto_download_files",
+      "value": "Files"
+    },
+    {
+      "name": "ds_auto_download_file_scopes_max",
+      "value": "Up to %1$s in %2$s"
+    },
+    {
+      "name": "ds_reset_auto_download",
+      "value": "Reset Auto-Download Settings"
+    },
+    {
+      "name": "ds_reset_auto_download_confirm",
+      "value": "Undo all custom auto-download settings"
     }
   ]
 }

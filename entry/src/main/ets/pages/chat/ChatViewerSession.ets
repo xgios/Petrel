@@ -6,6 +6,7 @@ import { KEY_POWER_SMOOTH_TRANSITIONS } from '../../store/AppSettings';
 import { promptAction } from '@kit.ArkUI';
 import { ViewerUnderlay } from '../../util/viewerUnderlay';
 import { logI } from '../../util/log';
+import { thumbPathFor } from '../../util/mediaThumbChannel';
 import { MessageStore } from '../../store/MessageStore';
 import { VIEWER_CHROME_ON_OPEN } from './MediaViewerOverlay';
 
@@ -138,7 +139,8 @@ export class ChatViewerSession {
     if (!mediaEntryIsPhoto(entry) && !mediaEntryIsVideo(entry)) {
       return;
     }
-    if (mediaEntryIsPhoto(entry) && entry.photoPath === '' && entry.photoFailed) {
+    if (mediaEntryIsPhoto(entry) && entry.photoPath === '' &&
+      thumbPathFor(entry.photoFileId) === '' && entry.photoFailed) {
       this.host.store()?.retryPhoto(messageId);
       promptAction.showToast({ message: $r('app.string.cp_reloading_thumb'), duration: 1200 });
       return;

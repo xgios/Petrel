@@ -75,16 +75,20 @@ export function prefetchAllowed(input: PrefetchDecisionInput): boolean {
 }
 
 // 尺寸未知（0）时只要头块：TDLib 里 limit=0 是"到文件末尾"，那就不是预取了。
-export function prefetchRanges(fileSize: number): VideoPrefetchRange[] {
+export function prefetchRanges(
+  fileSize: number,
+  headBytes: number = VIDEO_PREFETCH_HEAD_BYTES
+): VideoPrefetchRange[] {
+  const safeHead: number = headBytes > 0 ? headBytes : VIDEO_PREFETCH_HEAD_BYTES;
   if (fileSize <= 0) {
-    return [{ offset: 0, limit: VIDEO_PREFETCH_HEAD_BYTES }];
+    return [{ offset: 0, limit: safeHead }];
   }
-  if (fileSize <= VIDEO_PREFETCH_HEAD_BYTES) {
+  if (fileSize <= safeHead) {
     return [{ offset: 0, limit: fileSize }];
   }
   const tail: number = Math.min(PREPARE_TAIL_BYTES, fileSize);
   return [
-    { offset: 0, limit: VIDEO_PREFETCH_HEAD_BYTES },
+    { offset: 0, limit: safeHead },
     { offset: Math.max(0, fileSize - tail), limit: tail }
   ];
 }

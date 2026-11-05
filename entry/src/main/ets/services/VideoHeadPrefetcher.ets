@@ -2,8 +2,8 @@ import { TdClient } from '../tdkit/TdClient';
 import { TdError, TdRequest } from '../tdkit/TdTypes';
 import { VIDEO_HEAD_PREFETCH_PRIORITY } from '../util/downloadPriority';
 import {
-  MAX_CONCURRENT_VIDEO_PREFETCH, VIDEO_PREFETCH_DWELL_MS, VideoPrefetchRange, prefetchRanges,
-  prefetchRefusalReason
+  MAX_CONCURRENT_VIDEO_PREFETCH, VIDEO_PREFETCH_DWELL_MS, VIDEO_PREFETCH_HEAD_BYTES,
+  VideoPrefetchRange, prefetchRanges, prefetchRefusalReason
 } from '../util/videoPrefetchPolicy';
 import { logW } from '../util/log';
 
@@ -41,6 +41,7 @@ export interface VideoRef {
   fileId: number;
   fileSize: number;   // 0 = 未知
   local: boolean;     // 整份已在本地
+  preloadAllowed?: boolean;
 }
 
 export interface VideoPrefetchHost {
@@ -50,6 +51,7 @@ export interface VideoPrefetchHost {
   fileClaimed: (fileId: number) => boolean;
   network: () => string;
   powerSaving: () => boolean;
+  headBytes?: (fileSize: number) => number;
   subscribeEnabled?: (listener: (enabled: boolean) => void) => () => void;
   subscribeNetwork?: (listener: (network: string) => void) => () => void;
 }
@@ -119,6 +121,20 @@ export class VideoHeadPrefetcher {
       }
     } else if (!this.suspended) {
       this.resume();
+    }
+  }
+
+  onPolicyChanged(enabled: boolean): void {
+    if (this.disposed) {
+      return;
+    }
+    this.completed.clear();
+    if (this.enabled !== enabled) {
+      this.setEnabled(enabled);
+      return;
+    }
+    if (this.enabled && !this.suspended) {
+      this.retryVisible();
     }
   }
 
@@ -261,6 +277,8 @@ export class VideoHeadPrefetcher {
       if (ref === null || ref.fileId !== this.visible.get(key)) {
         this.dropMedia(messageId, albumIndex);
         this.reportMedia(messageId, albumIndex, 1);
+      } else if (ref.preloadAllowed === false) {
+        this.release(ref.fileId, true);
       } else {
         this.tryStart(ref);
       }
@@ -269,8 +287,8 @@ export class VideoHeadPrefetcher {
   }
 
   private tryStart(ref: VideoRef): void {
-    if (!this.enabled || this.suspended || this.host === null || this.completed.has(ref.fileId) ||
-      this.active.has(ref.fileId) || this.queue.indexOf(ref.fileId) >= 0) {
+    if (!this.enabled || this.suspended || this.host === null || ref.preloadAllowed === false ||
+      this.completed.has(ref.fileId) || this.active.has(ref.fileId) || this.queue.indexOf(ref.fileId) >= 0) {
       return;
     }
     const host: VideoPrefetchHost = this.host;
@@ -311,7 +329,10 @@ export class VideoHeadPrefetcher {
     this.active.add(ref.fileId);
     this.ownedFiles.add(ref.fileId);
     const seq: number = this.bumpSeq(ref.fileId);
-    const ranges: VideoPrefetchRange[] = prefetchRanges(ref.fileSize);
+    const headBytes: number = host.headBytes !== undefined
+      ? host.headBytes(ref.fileSize)
+      : VIDEO_PREFETCH_HEAD_BYTES;
+    const ranges: VideoPrefetchRange[] = prefetchRanges(ref.fileSize, headBytes);
     // 下发这一条与上面那条拒绝成对：两条都在，才谈得上"下发了但没下完"。
     logW(`[Prefetch] start file=${ref.fileId} size=${ref.fileSize} blocks=${ranges.length}` +
       ` network=${host.network()} active=${this.active.size}`);

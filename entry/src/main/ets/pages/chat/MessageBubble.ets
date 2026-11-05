@@ -18,7 +18,9 @@ import { GiveawayBubble } from './GiveawayBubble';
 import { formatClockTime } from '../../util/formatTime';
 import { COLOR_PRIMARY, COLOR_TEXT_SECONDARY, bubbleTextFor } from '../../util/theme';
 import { str } from '../../util/strings';
-import { progressForOr, subscribeProgress } from '../../util/mediaProgressChannel';
+import {
+  progressForOr, subscribeProgress, subscribeThumbActive, thumbActiveFor
+} from '../../util/mediaProgressChannel';
 import { viewsReserve } from '../../util/viewCountChannel';
 import { translationReplacesOriginal } from '../../util/translationMode';
 import { AlbumGroup } from '../../util/collapseAlbums';
@@ -63,9 +65,13 @@ export struct MessageBubble {
 
   @Local private liveVideoProgress: number = 0;
 
+  @Local private liveVideoActive: boolean = false;
+
   private unsubPhotoProgress: (() => void) | null = null;
 
   private unsubVideoProgress: (() => void) | null = null;
+
+  private unsubVideoActive: (() => void) | null = null;
 
   @Local private videoNotePlaying: boolean = false;
 
@@ -83,6 +89,8 @@ export struct MessageBubble {
     if (message.videoFileId !== 0) {
       this.unsubVideoProgress = subscribeProgress(message.videoFileId,
         (percent: number): void => { this.liveVideoProgress = percent; });
+      this.unsubVideoActive = subscribeThumbActive(message.videoFileId,
+        (active: boolean): void => { this.liveVideoActive = active; });
     }
     // 原地替换媒体可能只换 fileId；保留精确的通道身份，普通正文/状态更新不重挂。
     this.attachedRowId = message.rowId;
@@ -93,6 +101,8 @@ export struct MessageBubble {
   private seedProgress(message: MessageEntry): void {
     this.livePhotoProgress = progressForOr(message.photoFileId, message.photoProgress);
     this.liveVideoProgress = progressForOr(message.videoFileId, message.videoProgress);
+    this.liveVideoActive = message.videoPath === '' &&
+      (thumbActiveFor(message.videoFileId) || message.mediaDownloadActive);
   }
 
   private detachMessageChannels(): void {
@@ -103,6 +113,10 @@ export struct MessageBubble {
     if (this.unsubVideoProgress !== null) {
       this.unsubVideoProgress();
       this.unsubVideoProgress = null;
+    }
+    if (this.unsubVideoActive !== null) {
+      this.unsubVideoActive();
+      this.unsubVideoActive = null;
     }
     this.attachedRowId = 0;
   }
@@ -341,7 +355,7 @@ export struct MessageBubble {
         filePath: this.msg.videoPath,
         downloadProgress: this.liveVideoProgress,
         downloadFailed: this.msg.videoFailed,
-        downloadActive: this.msg.mediaDownloadActive,
+        downloadActive: this.msg.videoPath === '' && (this.liveVideoActive || this.msg.mediaDownloadActive),
         uploading: this.context.liveSendState === 'sending',
         maxWidth: this.inlineMaxW(),
         // 长按弹菜单/左滑回复会认领手势；FileBubble 是子组件、看不到认领标记，

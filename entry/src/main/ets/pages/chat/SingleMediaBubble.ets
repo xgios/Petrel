@@ -3,7 +3,9 @@ import { MessageEntry } from '../../store/MessageEntry';
 import { AlbumGroup } from '../../util/collapseAlbums';
 import { MessageBubbleContext, MessageBubbleShell } from './MessageBubbleShell';
 import { MessageBubbleText } from './MessageBubbleText';
-import { progressForOr, subscribeProgress } from '../../util/mediaProgressChannel';
+import {
+  progressForOr, subscribeProgress, subscribeThumbActive, thumbActiveFor
+} from '../../util/mediaProgressChannel';
 import { publishThumbPath, thumbPathFor } from '../../util/mediaThumbChannel';
 import { posterFor, requestPoster, subscribePoster } from '../../util/videoPosterStore';
 import { MessageBubbleActions, MessageBubbleRenderData } from './ReusableMessageBubble';
@@ -15,7 +17,7 @@ import { ThumbReadyGate } from './ThumbReadyGate';
 import { EntryVideoFileRef, entryInlineFile } from '../../util/entryVideoVariant';
 import { mediaBoxFor, MediaBox, BUBBLE_AVATAR_GUTTER_VP } from '../../util/mediaBox';
 import { thumbBackdropColor } from '../../util/thumbBackdrop';
-import { miniPlaceholderOf } from '../../util/miniThumbPlaceholder';
+import { MINI_PLACEHOLDER_BLUR, miniPlaceholderOf } from '../../util/miniThumbPlaceholder';
 import { isLivePhotoVideo } from '../../util/livePhoto';
 import { formatFileSize } from '../../util/formatFileSize';
 import { formatMediaDuration } from '../../util/mediaDuration';
@@ -41,21 +43,27 @@ export struct SingleMediaBubble {
   private env: ChatEnvMirror = chatEnv;
   @Local private livePhotoProgress: number = 0;
   @Local private liveVideoProgress: number = 0;
+  @Local private liveVideoActive: boolean = false;
   @Local private localVideoPoster: string = '';
   @Local private mediaVisible: boolean = true;
   private mediaCenterY: number = 0;
+  private lastMediaRatio: number = 0;
+  private badgeTapAt: number = 0;
   private attachedRowId: number = 0;
   private attachedPhotoFileId: number = 0;
   private attachedVideoFileId: number = 0;
   private attachedVideoPath: string = '';
   private unsubPhotoProgress: (() => void) | null = null;
   private unsubVideoProgress: (() => void) | null = null;
+  private unsubVideoActive: (() => void) | null = null;
   private unsubPoster: (() => void) | null = null;
   private competingMessageId: number = 0;
 
   private seedProgress(): void {
     this.livePhotoProgress = progressForOr(this.msg.photoFileId, this.msg.photoProgress);
     this.liveVideoProgress = progressForOr(this.msg.videoFileId, this.msg.videoProgress);
+    this.liveVideoActive = this.msg.videoPath === '' &&
+      (thumbActiveFor(this.msg.videoFileId) || this.msg.mediaDownloadActive);
   }
 
   private attachVideoPoster(): void {
@@ -99,6 +107,8 @@ export struct SingleMediaBubble {
     if (this.msg.videoFileId !== 0) {
       this.unsubVideoProgress = subscribeProgress(this.msg.videoFileId,
         (percent: number): void => { this.liveVideoProgress = percent; });
+      this.unsubVideoActive = subscribeThumbActive(this.msg.videoFileId,
+        (active: boolean): void => { this.liveVideoActive = active; });
     }
     this.attachVideoPoster();
     this.attachedRowId = this.msg.rowId;
@@ -114,6 +124,10 @@ export struct SingleMediaBubble {
     if (this.unsubVideoProgress !== null) {
       this.unsubVideoProgress();
       this.unsubVideoProgress = null;
+    }
+    if (this.unsubVideoActive !== null) {
+      this.unsubVideoActive();
+      this.unsubVideoActive = null;
     }
     this.detachVideoPoster();
     this.attachedRowId = 0;
@@ -148,11 +162,13 @@ export struct SingleMediaBubble {
     this.detachProgress();
     this.releaseCandidate();
     this.mediaCenterY = 0;
+    this.lastMediaRatio = 0;
   }
 
   aboutToReuse(): void {
     this.releaseCandidate();
     this.mediaCenterY = 0;
+    this.lastMediaRatio = 0;
     this.attachProgress();
     this.syncCandidate();
     this.requestAutoplayDownload();
@@ -160,9 +176,11 @@ export struct SingleMediaBubble {
 
   @Monitor('msg')
   onMessageChanged(): void {
+    const prevVideoPath: string = this.attachedVideoPath;
     if (this.attachedRowId !== this.msg.rowId) {
       this.releaseCandidate();
       this.mediaCenterY = 0;
+      this.lastMediaRatio = 0;
       if (!this.mediaVisible) { this.mediaVisible = true; }
     }
     if (this.attachedRowId !== this.msg.rowId || this.attachedPhotoFileId !== this.msg.photoFileId ||
@@ -173,6 +191,11 @@ export struct SingleMediaBubble {
     }
     // 包括临时 id → 真实 id，以及普通视频 → GIF 的原地替换。
     this.syncCandidate();
+    // 视频自动下载/手动下载刚完成时，重新上报可见度使 PlaySlotDriver 立即评估内嵌播放。
+    if (prevVideoPath === '' && this.msg.videoPath !== '' &&
+      this.msg.contentType === 'video' && !this.msg.isAnimation && this.lastMediaRatio > 0) {
+      this.actions.onMediaRatio(this.msg.id, -1, this.lastMediaRatio, this.mediaCenterY);
+    }
   }
 
   private isPlaySlot(): boolean {
@@ -220,19 +243,39 @@ export struct SingleMediaBubble {
   }
 
   private videoDownloadActive(): boolean {
-    return this.msg.videoPath === '' &&
-      this.liveVideoProgress > 0 && this.liveVideoProgress < 100;
+    return this.msg.videoPath === '' && (this.liveVideoActive || this.msg.mediaDownloadActive);
   }
 
-  private videoMetaText(): string {
+  private showVideoDownloadPill(): boolean {
+    return this.msg.contentType === 'video' &&
+      !this.msg.isAnimation &&
+      !this.msgIsLivePhoto() &&
+      this.msg.videoPath === '' &&
+      this.liveVideoProgress < 100 &&
+      this.context.liveSendState !== 'sending';
+  }
+
+  private videoDownloadSubtext(): string {
+    const hasProgress: boolean = this.videoDownloadActive() ||
+      (this.liveVideoProgress > 0 && this.liveVideoProgress < 100);
+    if (hasProgress && this.msg.videoFileSize > 0) {
+      return `${this.liveVideoProgress}% · ${formatFileSize(this.msg.videoFileSize)}`;
+    }
+    if (hasProgress) {
+      return `${this.liveVideoProgress}%`;
+    }
+    if (this.msg.videoFileSize > 0) {
+      return formatFileSize(this.msg.videoFileSize);
+    }
+    return str('AttachVideo');
+  }
+
+  private videoCompactMetaText(): string {
     if (this.msg.isAnimation) {
       return this.msg.videoDuration > 0
         ? `GIF · ${this.formatDuration(this.msg.videoDuration)}`
         : 'GIF';
     }
-    // 时长和大小一起显示（issue #93）：只有时长时看不出这条视频要下多少。
-    // 大小的位置再换成缓存状态（2026-09-15）：下完了写「已缓存」，正在下写百分比——后台缓存的进度
-    // 也经 mediaProgressChannel 到这里（services/BackgroundCache）。
     const parts: string[] = [];
     if (this.msg.videoDuration > 0) {
       parts.push(this.formatDuration(this.msg.videoDuration));
@@ -243,12 +286,6 @@ export struct SingleMediaBubble {
       } else if (this.msg.videoFileSize > 0) {
         parts.push(formatFileSize(this.msg.videoFileSize));
       }
-    } else if (this.msg.videoPath !== '') {
-      parts.push(str('mb_video_cached'));
-    } else if (this.videoDownloadActive()) {
-      parts.push(`${this.liveVideoProgress}%`);
-    } else if (this.msg.videoFileSize > 0) {
-      parts.push(formatFileSize(this.msg.videoFileSize));
     }
     return parts.join(' · ');
   }
@@ -313,7 +350,8 @@ export struct SingleMediaBubble {
   }
 
   @Builder
-  mediaLoadState(size: number, fileId: number, initialPercent: number, failed: boolean) {
+  mediaLoadState(size: number, fileId: number, initialPercent: number, failed: boolean,
+    showDownloadIcon: boolean = false) {
     if (failed) {
       Column({ space: 3 }) {
         SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(Math.max(17, size * 0.5))
@@ -324,7 +362,12 @@ export struct SingleMediaBubble {
       .backgroundColor('#80000000').borderRadius(18);
     } else {
       // 进度不进 key，环自己订阅自己更新（见 LiveProgressRing / collapseAlbums）。
-      LiveProgressRing({ fileId: fileId, initialPercent: initialPercent, ringSize: size });
+      LiveProgressRing({
+        fileId: fileId,
+        initialPercent: initialPercent,
+        ringSize: size,
+        showDownloadIcon: showDownloadIcon
+      });
     }
   }
 
@@ -347,15 +390,23 @@ export struct SingleMediaBubble {
     Stack() {
       Column().width(this.mediaBox().width).height(this.mediaBox().height).borderRadius(this.mediaCornerRadius())
         .backgroundColor(thumbBackdropColor(this.msg.contentType === 'video'));
+      if (miniPlaceholderOf(this.msg.photoMini) !== '') {
+        Image(miniPlaceholderOf(this.msg.photoMini))
+          .draggable(false)
+          .width(this.mediaBox().width).height(this.mediaBox().height)
+          .borderRadius(this.mediaCornerRadius()).clip(true)
+          .objectFit(ImageFit.Cover)
+          .blur(MINI_PLACEHOLDER_BLUR);
+      }
       if (this.msg.contentType === 'video') {
         // Wait only when a real thumbnail file exists. Videos without a
         // cover remain playable and get the normal play control below.
         if (hasFile && !this.msg.photoFailed) {
-          this.mediaLoadState(36, this.msg.photoFileId, this.livePhotoProgress, false);
+          this.mediaLoadState(36, this.msg.photoFileId, this.livePhotoProgress, false, false);
         }
       } else {
         this.mediaLoadState(36, this.msg.photoFileId, this.livePhotoProgress,
-          this.msg.photoFailed || !hasFile);
+          this.msg.photoFailed || !hasFile, true);
       }
     }.width(this.mediaBox().width).height(this.mediaBox().height);
   }
@@ -370,12 +421,7 @@ export struct SingleMediaBubble {
     Stack() {
       Circle({ width: size, height: size }).fill('#78000000')
         .stroke('#24FFFFFF').strokeWidth(1);
-      if (this.videoDownloadActive()) {
-        Progress({ value: this.liveVideoProgress, total: 100, type: ProgressType.Ring })
-          .width(size).height(size).color(Color.White);
-        SymbolGlyph($r('sys.symbol.play_fill'))
-          .fontSize(size * 0.34).fontColor([Color.White]).margin({ left: 2 });
-      } else if (this.msg.isAnimation && this.animationDownloadExpected()) {
+      if (this.msg.isAnimation && this.animationDownloadExpected()) {
         LoadingProgress().width(size * 0.62).height(size * 0.62).color(Color.White);
       } else if (this.msg.videoFailed || this.data.animationPlaybackFailed) {
         SymbolGlyph($r('sys.symbol.arrow_clockwise'))
@@ -392,8 +438,60 @@ export struct SingleMediaBubble {
     .animation({ duration: this.effectDuration(160), curve: Curve.EaseOut });
   }
 
+  @Builder
+  videoTopLeftBadge() {
+    if (this.showVideoDownloadPill()) {
+      Row({ space: 6 }) {
+        if (this.videoDownloadActive()) {
+          Progress({ value: this.liveVideoProgress, total: 100, type: ProgressType.Ring })
+            .width(18).height(18).color(Color.White);
+        } else {
+          SymbolGlyph($r('sys.symbol.cloud_and_arrow_down'))
+            .fontSize(18).fontColor([Color.White]);
+        }
+        Column({ space: 1 }) {
+          Text(this.formatDuration(this.msg.videoDuration))
+            .fontSize(11).fontWeight(FontWeight.Medium).fontColor(Color.White);
+          Text(this.videoDownloadSubtext())
+            .fontSize(10).fontColor('#E6FFFFFF');
+        }
+        .alignItems(HorizontalAlign.Start);
+      }
+      .alignItems(VerticalAlign.Center)
+      .backgroundColor('#73000000')
+      .borderRadius(10)
+      .padding({ left: 8, right: 9, top: 4, bottom: 4 })
+      .position({ x: 6, y: 6 })
+      .onClick((): void => {
+        this.badgeTapAt = Date.now();
+        if (this.context.gestureClaimed) { return; }
+        if (this.data.selectionActive) {
+          this.actions.onToggleSelectedMessage(this.msg.id);
+          return;
+        }
+        if (this.videoDownloadActive()) {
+          this.actions.onFilePause(this.msg.id);
+        } else {
+          this.actions.onVideoRetry(this.msg.id);
+        }
+      });
+    } else if (this.videoCompactMetaText() !== '') {
+      Text(this.videoCompactMetaText())
+        .fontSize(11).fontColor(Color.White).backgroundColor('#66000000')
+        .borderRadius(8).padding({ left: 6, right: 6, top: 2, bottom: 2 })
+        .position({ x: 6, y: this.msgIsLivePhoto() ? 28 : 6 });
+    }
+  }
+
   private thumbnailRetryable(): boolean {
     return this.msg.photoPath === '' && this.msg.photoFailed && this.msg.photoFileId !== 0;
+  }
+
+  private photoNeedsDownloadTap(): boolean {
+    return this.msg.contentType === 'photo' &&
+      this.msg.photoFileId !== 0 &&
+      this.msg.photoPath === '' &&
+      thumbPathFor(this.msg.photoFileId) === '';
   }
 
   private inlineVideoFile(): EntryVideoFileRef {
@@ -538,11 +636,8 @@ export struct SingleMediaBubble {
       if (this.msgIsLivePhoto()) {
         this.liveChip();
       }
-      if (this.msg.contentType === 'video' && this.videoMetaText() !== '') {
-        Text(this.videoMetaText())
-          .fontSize(11).fontColor(Color.White).backgroundColor('#66000000')
-          .borderRadius(8).padding({ left: 6, right: 6, top: 2, bottom: 2 })
-          .position({ x: 6, y: Math.max(6, this.mediaBox().height - 24) });
+      if (this.msg.contentType === 'video') {
+        this.videoTopLeftBadge();
       }
     }
     .width(this.mediaBox().width).height(this.mediaBox().height)
@@ -575,6 +670,7 @@ export struct SingleMediaBubble {
         if (this.msg.contentType !== 'video' || this.msg.isAnimation) {
           return; // 只有普通视频参与播放位竞选：GIF/动图仍走整文件循环播放
         }
+        this.lastMediaRatio = ratio;
         if (ratio <= 0) {
           this.actions.onMediaGone(this.msg.id, -1);
         } else {
@@ -585,11 +681,11 @@ export struct SingleMediaBubble {
       this.mediaCenterY = (area.globalPosition.y as number) + (area.height as number) / 2;
     })
     .onClick((e: ClickEvent) => {
-      if (this.context.gestureClaimed) { return; }
+      if (this.context.gestureClaimed || Date.now() - this.badgeTapAt < 80) { return; }
       // A failed cover remains a thumbnail-only retry. A failed video does
       // not intercept the whole media surface: ChatPage.openViewer can open
       // the streaming viewer and independently restart the file download.
-      if (this.thumbnailRetryable()) {
+      if (this.thumbnailRetryable() || this.photoNeedsDownloadTap()) {
         this.actions.onSpecialPhotoRetry(this.msg.id);
         return;
       }

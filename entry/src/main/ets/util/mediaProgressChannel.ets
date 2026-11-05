@@ -13,6 +13,45 @@
 // 与 mediaThumbChannel 同构，进程级全局：同一个文件在任何聊天里都是同一份。
 const percents: Map<number, number> = new Map();
 const subs: Map<number, Set<(percent: number) => void>> = new Map();
+const activeThumbs: Set<number> = new Set();
+const activeSubs: Map<number, Set<(active: boolean) => void>> = new Map();
+
+export function publishThumbActive(fileId: number, active: boolean): void {
+  if (fileId === 0 || activeThumbs.has(fileId) === active) {
+    return;
+  }
+  if (active) {
+    activeThumbs.add(fileId);
+  } else {
+    activeThumbs.delete(fileId);
+  }
+  const listeners = activeSubs.get(fileId);
+  if (listeners !== undefined) {
+    listeners.forEach((cb: (active: boolean) => void): void => cb(active));
+  }
+}
+
+export function thumbActiveFor(fileId: number): boolean {
+  return activeThumbs.has(fileId);
+}
+
+export function subscribeThumbActive(fileId: number, cb: (active: boolean) => void): () => void {
+  let listeners = activeSubs.get(fileId);
+  if (listeners === undefined) {
+    listeners = new Set<(active: boolean) => void>();
+    activeSubs.set(fileId, listeners);
+  }
+  listeners.add(cb);
+  return (): void => {
+    const current = activeSubs.get(fileId);
+    if (current !== undefined) {
+      current.delete(cb);
+      if (current.size === 0) {
+        activeSubs.delete(fileId);
+      }
+    }
+  };
+}
 
 // 进度没变就不通知——否则每次 applyFile 都会把订阅者叫醒一遍。
 // 与路径通道不同，0 是有意义的值（"还没开始"），不能当空值跳过。

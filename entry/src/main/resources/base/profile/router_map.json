@@ -116,6 +116,21 @@
       "buildFunction": "DataStoragePageBuilder"
     },
     {
+      "name": "AutoDownloadPhotoPage",
+      "pageSourceFile": "src/main/ets/pages/main/AutoDownloadPhotoPage.ets",
+      "buildFunction": "AutoDownloadPhotoPageBuilder"
+    },
+    {
+      "name": "AutoDownloadVideoPage",
+      "pageSourceFile": "src/main/ets/pages/main/AutoDownloadVideoPage.ets",
+      "buildFunction": "AutoDownloadVideoPageBuilder"
+    },
+    {
+      "name": "AutoDownloadFilePage",
+      "pageSourceFile": "src/main/ets/pages/main/AutoDownloadFilePage.ets",
+      "buildFunction": "AutoDownloadFilePageBuilder"
+    },
+    {
       "name": "ActiveSessionsPage",
       "pageSourceFile": "src/main/ets/pages/main/ActiveSessionsPage.ets",
       "buildFunction": "ActiveSessionsPageBuilder"

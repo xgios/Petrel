@@ -1,5 +1,18 @@
 import { KEY_HIDE_PINNED_DEFAULT, pinnedVisibilityDefaults } from '../util/pinnedVisibilityState';
 import { KEY_VIDEO_AUTO_PRELOAD, publishVideoPreload } from '../util/videoPreloadSetting';
+import {
+  KEY_AUTODOWNLOAD_MASTER, KEY_AUTODOWNLOAD_PHOTO_PRIVATE,
+  KEY_AUTODOWNLOAD_PHOTO_GROUP, KEY_AUTODOWNLOAD_PHOTO_CHANNEL,
+  KEY_AUTODOWNLOAD_VIDEO_PRIVATE, KEY_AUTODOWNLOAD_VIDEO_GROUP,
+  KEY_AUTODOWNLOAD_VIDEO_CHANNEL, KEY_AUTODOWNLOAD_VIDEO_MAX_MB,
+  KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE, KEY_AUTODOWNLOAD_VIDEO_PRELOAD_MB,
+  KEY_AUTODOWNLOAD_FILE_PRIVATE, KEY_AUTODOWNLOAD_FILE_GROUP,
+  KEY_AUTODOWNLOAD_FILE_CHANNEL, KEY_AUTODOWNLOAD_FILE_MAX_MB,
+  AUTODOWNLOAD_VIDEO_MAX_MB_DEFAULT, AUTODOWNLOAD_VIDEO_PRELOAD_MB_DEFAULT,
+  AUTODOWNLOAD_FILE_MAX_MB_DEFAULT,
+  normalizeAutoDownloadVideoMaxMb, normalizeAutoDownloadVideoPreloadMb,
+  isAutoDownloadKey, publishAutoDownloadChanged
+} from '../util/autoDownloadPolicy';
 import { HOLD_SPEED_LIMIT_DEFAULT, normalizeHoldSpeedLimit } from '../util/holdSpeedLimit';
 import { preferences } from '@kit.ArkData';
 import { EXT_LINK_DEFAULT } from '../util/externalLinkPolicy';
@@ -34,6 +47,15 @@ import {
 
 export { KEY_HIDE_PINNED_DEFAULT } from '../util/pinnedVisibilityState';
 export { KEY_VIDEO_AUTO_PRELOAD } from '../util/videoPreloadSetting';
+export {
+  KEY_AUTODOWNLOAD_MASTER, KEY_AUTODOWNLOAD_PHOTO_PRIVATE,
+  KEY_AUTODOWNLOAD_PHOTO_GROUP, KEY_AUTODOWNLOAD_PHOTO_CHANNEL,
+  KEY_AUTODOWNLOAD_VIDEO_PRIVATE, KEY_AUTODOWNLOAD_VIDEO_GROUP,
+  KEY_AUTODOWNLOAD_VIDEO_CHANNEL, KEY_AUTODOWNLOAD_VIDEO_MAX_MB,
+  KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE, KEY_AUTODOWNLOAD_VIDEO_PRELOAD_MB,
+  KEY_AUTODOWNLOAD_FILE_PRIVATE, KEY_AUTODOWNLOAD_FILE_GROUP,
+  KEY_AUTODOWNLOAD_FILE_CHANNEL, KEY_AUTODOWNLOAD_FILE_MAX_MB
+} from '../util/autoDownloadPolicy';
 
 // User settings that outlive the process. Each one is mirrored into AppStorage
 // so any component can bind it with @StorageProp and re-render on change, while
@@ -428,6 +450,14 @@ export const KEY_MUSIC_CENTER_ON: string = 'musicCenterOn';
 export const KEY_FOLDER_BAR_SCROLL_HIDE: string = 'folderBarScrollHide';
 
 const DATA_BOOLEAN_TRUE_DEFAULTS: string[] = [
+  KEY_AUTODOWNLOAD_MASTER,
+  KEY_AUTODOWNLOAD_PHOTO_PRIVATE,
+  KEY_AUTODOWNLOAD_PHOTO_GROUP,
+  KEY_AUTODOWNLOAD_PHOTO_CHANNEL,
+  KEY_AUTODOWNLOAD_VIDEO_PRIVATE,
+  KEY_AUTODOWNLOAD_VIDEO_GROUP,
+  KEY_AUTODOWNLOAD_VIDEO_CHANNEL,
+  KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE,
   KEY_VIDEO_AUTO_PRELOAD,
   KEY_BG_CACHE_WIFI_ONLY,
   KEY_CRASH_UPLOAD,
@@ -458,6 +488,9 @@ const DATA_BOOLEAN_FALSE_DEFAULTS: string[] = [
   KEY_AUTOSAVE_PRIVATE,
   KEY_AUTOSAVE_GROUP,
   KEY_AUTOSAVE_CHANNEL,
+  KEY_AUTODOWNLOAD_FILE_PRIVATE,
+  KEY_AUTODOWNLOAD_FILE_GROUP,
+  KEY_AUTODOWNLOAD_FILE_CHANNEL,
   KEY_PROXY_AUTO_SWITCH,
   KEY_TRANSLATE_CHATS,
   KEY_TRANSLATE_REPLACE_ORIGINAL,
@@ -636,6 +669,18 @@ export async function initSettings(context: common.Context): Promise<void> {
     }
     AppStorage.setOrCreate(KEY_AUTOPLAY_MUTED, await s.get(KEY_AUTOPLAY_MUTED, true) as boolean);
     AppStorage.setOrCreate(KEY_AUTOPLAY_MAX_MB, await s.get(KEY_AUTOPLAY_MAX_MB, 0) as number);
+    AppStorage.setOrCreate(KEY_AUTODOWNLOAD_VIDEO_MAX_MB,
+      normalizeAutoDownloadVideoMaxMb(
+        await s.get(KEY_AUTODOWNLOAD_VIDEO_MAX_MB, AUTODOWNLOAD_VIDEO_MAX_MB_DEFAULT) as number
+      ));
+    AppStorage.setOrCreate(KEY_AUTODOWNLOAD_VIDEO_PRELOAD_MB,
+      normalizeAutoDownloadVideoPreloadMb(
+        await s.get(KEY_AUTODOWNLOAD_VIDEO_PRELOAD_MB, AUTODOWNLOAD_VIDEO_PRELOAD_MB_DEFAULT) as number
+      ));
+    AppStorage.setOrCreate(KEY_AUTODOWNLOAD_FILE_MAX_MB,
+      normalizeAutoDownloadVideoMaxMb(
+        await s.get(KEY_AUTODOWNLOAD_FILE_MAX_MB, AUTODOWNLOAD_FILE_MAX_MB_DEFAULT) as number
+      ));
     AppStorage.setOrCreate(KEY_HOLD_SPEED_LIMIT,
       normalizeHoldSpeedLimit(await s.get(KEY_HOLD_SPEED_LIMIT, HOLD_SPEED_LIMIT_DEFAULT) as number));
     for (const key of DATA_STRING_KEYS) {
@@ -664,6 +709,9 @@ export async function initSettings(context: common.Context): Promise<void> {
     logE(`AppSettings.initSettings failed: ${e}`);
     // Defaults still populate AppStorage so the UI works without persistence.
     AppStorage.setOrCreate(KEY_HOLD_SPEED_LIMIT, HOLD_SPEED_LIMIT_DEFAULT);
+    AppStorage.setOrCreate(KEY_AUTODOWNLOAD_VIDEO_MAX_MB, AUTODOWNLOAD_VIDEO_MAX_MB_DEFAULT);
+    AppStorage.setOrCreate(KEY_AUTODOWNLOAD_VIDEO_PRELOAD_MB, AUTODOWNLOAD_VIDEO_PRELOAD_MB_DEFAULT);
+    AppStorage.setOrCreate(KEY_AUTODOWNLOAD_FILE_MAX_MB, AUTODOWNLOAD_FILE_MAX_MB_DEFAULT);
     AppStorage.setOrCreate(KEY_TEXT_SIZE, TEXT_SIZE_DEFAULT);
     AppStorage.setOrCreate(KEY_SPLIT_NAV_WIDTH, 0);
     AppStorage.setOrCreate(KEY_BUBBLE_RADIUS, RADIUS_DEFAULT);
@@ -736,11 +784,17 @@ function persist(key: string, value: preferences.ValueType): void {
 
 export function setNumber(key: string, value: number): void {
   if (key === KEY_HOLD_SPEED_LIMIT) { value = normalizeHoldSpeedLimit(value); }
+  if (key === KEY_AUTODOWNLOAD_VIDEO_MAX_MB) { value = normalizeAutoDownloadVideoMaxMb(value); }
+  if (key === KEY_AUTODOWNLOAD_FILE_MAX_MB) { value = normalizeAutoDownloadVideoMaxMb(value); }
+  if (key === KEY_AUTODOWNLOAD_VIDEO_PRELOAD_MB) { value = normalizeAutoDownloadVideoPreloadMb(value); }
   AppStorage.setOrCreate(key, value);
   mirrorChatEnvKey(key, value);
   persist(key, value);
   if (key === KEY_POWER_THRESHOLD) {
     refreshPowerSavingState();
+  }
+  if (isAutoDownloadKey(key)) {
+    publishAutoDownloadChanged();
   }
 }
 
@@ -758,12 +812,95 @@ export function setBoolean(key: string, value: boolean): void {
   if (key === KEY_VIDEO_AUTO_PRELOAD) {
     publishVideoPreload(value);
   }
+  if (isAutoDownloadKey(key)) {
+    publishAutoDownloadChanged();
+  }
 }
 
 export function setString(key: string, value: string): void {
   AppStorage.setOrCreate(key, value);
   mirrorChatEnvKey(key, value);
   persist(key, value);
+}
+
+const AUTODOWNLOAD_SCOPE_KEYS: string[] = [
+  KEY_AUTODOWNLOAD_PHOTO_PRIVATE,
+  KEY_AUTODOWNLOAD_PHOTO_GROUP,
+  KEY_AUTODOWNLOAD_PHOTO_CHANNEL,
+  KEY_AUTODOWNLOAD_VIDEO_PRIVATE,
+  KEY_AUTODOWNLOAD_VIDEO_GROUP,
+  KEY_AUTODOWNLOAD_VIDEO_CHANNEL,
+  KEY_AUTODOWNLOAD_FILE_PRIVATE,
+  KEY_AUTODOWNLOAD_FILE_GROUP,
+  KEY_AUTODOWNLOAD_FILE_CHANNEL
+];
+
+export function applyAutoDownloadSubpageToggle(key: string, nextValue: boolean): void {
+  const masterWasOn: boolean = AppStorage.get<boolean>(KEY_AUTODOWNLOAD_MASTER) ?? true;
+  const currentEffective: boolean = masterWasOn && (AppStorage.get<boolean>(key) ?? false);
+  if (currentEffective === nextValue) {
+    return;
+  }
+  if (!masterWasOn && nextValue) {
+    for (const scopeKey of AUTODOWNLOAD_SCOPE_KEYS) {
+      const targetVal: boolean = scopeKey === key;
+      AppStorage.setOrCreate(scopeKey, targetVal);
+      persist(scopeKey, targetVal);
+    }
+    if (key === KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE) {
+      AppStorage.setOrCreate(KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE, true);
+      persist(KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE, true);
+    }
+    AppStorage.setOrCreate(KEY_AUTODOWNLOAD_MASTER, true);
+    persist(KEY_AUTODOWNLOAD_MASTER, true);
+    publishAutoDownloadChanged();
+    return;
+  }
+  AppStorage.setOrCreate(key, nextValue);
+  persist(key, nextValue);
+  if (!nextValue && AUTODOWNLOAD_SCOPE_KEYS.indexOf(key) >= 0) {
+    const anyScopeOn: boolean = AUTODOWNLOAD_SCOPE_KEYS.some(
+      (scopeKey: string): boolean => AppStorage.get<boolean>(scopeKey) ?? false
+    );
+    if (!anyScopeOn) {
+      AppStorage.setOrCreate(KEY_AUTODOWNLOAD_MASTER, false);
+      persist(KEY_AUTODOWNLOAD_MASTER, false);
+    }
+  }
+  publishAutoDownloadChanged();
+}
+
+export function resetAutoDownloadSettings(): void {
+  const trueKeys: string[] = [
+    KEY_AUTODOWNLOAD_MASTER,
+    KEY_AUTODOWNLOAD_PHOTO_PRIVATE,
+    KEY_AUTODOWNLOAD_PHOTO_GROUP,
+    KEY_AUTODOWNLOAD_PHOTO_CHANNEL,
+    KEY_AUTODOWNLOAD_VIDEO_PRIVATE,
+    KEY_AUTODOWNLOAD_VIDEO_GROUP,
+    KEY_AUTODOWNLOAD_VIDEO_CHANNEL,
+    KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE
+  ];
+  for (const key of trueKeys) {
+    AppStorage.setOrCreate(key, true);
+    persist(key, true);
+  }
+  const falseKeys: string[] = [
+    KEY_AUTODOWNLOAD_FILE_PRIVATE,
+    KEY_AUTODOWNLOAD_FILE_GROUP,
+    KEY_AUTODOWNLOAD_FILE_CHANNEL
+  ];
+  for (const key of falseKeys) {
+    AppStorage.setOrCreate(key, false);
+    persist(key, false);
+  }
+  AppStorage.setOrCreate(KEY_AUTODOWNLOAD_VIDEO_MAX_MB, AUTODOWNLOAD_VIDEO_MAX_MB_DEFAULT);
+  persist(KEY_AUTODOWNLOAD_VIDEO_MAX_MB, AUTODOWNLOAD_VIDEO_MAX_MB_DEFAULT);
+  AppStorage.setOrCreate(KEY_AUTODOWNLOAD_VIDEO_PRELOAD_MB, AUTODOWNLOAD_VIDEO_PRELOAD_MB_DEFAULT);
+  persist(KEY_AUTODOWNLOAD_VIDEO_PRELOAD_MB, AUTODOWNLOAD_VIDEO_PRELOAD_MB_DEFAULT);
+  AppStorage.setOrCreate(KEY_AUTODOWNLOAD_FILE_MAX_MB, AUTODOWNLOAD_FILE_MAX_MB_DEFAULT);
+  persist(KEY_AUTODOWNLOAD_FILE_MAX_MB, AUTODOWNLOAD_FILE_MAX_MB_DEFAULT);
+  publishAutoDownloadChanged();
 }
 
 function boolValue(key: string, fallback: boolean): boolean {

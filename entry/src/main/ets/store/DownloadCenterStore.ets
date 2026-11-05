@@ -146,8 +146,7 @@ export class DownloadCenterStore {
   }
 
   hasMore(): boolean {
-    return this.managerDoneMore || this.cachedLoaded < this.records.length || !this.diskScanned ||
-      this.diskLoaded < this.diskFiles.length;
+    return this.managerDoneMore || this.cachedLoaded < this.records.length;
   }
 
   load(context: common.Context): void {
@@ -429,16 +428,13 @@ export class DownloadCenterStore {
   }
 
   // 每一路「已加载到哪儿、还有没有下一页」，算「已完成」的水位线用。
+  // 原始磁盘缓存（disk）不在界面列出，不参与水位线，免得磁盘上百张近期图片把更早的下载记录压住不显示。
   private windows(): DcSourceWindow[] {
     return [
       { hasMore: this.managerDoneMore, loadedCount: this.managerDone.length, oldestLoadedMtime: oldestMtime(this.managerDone) },
       {
         hasMore: this.cachedLoaded < this.records.length, loadedCount: this.cachedLoaded,
         oldestLoadedMtime: this.cachedLoaded > 0 ? this.records[this.cachedLoaded - 1].addedAt : 0
-      },
-      {
-        hasMore: !this.diskScanned || this.diskLoaded < this.diskFiles.length, loadedCount: this.diskLoaded,
-        oldestLoadedMtime: this.diskLoaded > 0 ? this.diskFiles[this.diskLoaded - 1].mtimeSec * 1000 : 0
       }
     ];
   }

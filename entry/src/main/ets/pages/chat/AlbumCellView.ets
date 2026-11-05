@@ -1,5 +1,9 @@
 import { thumbBackdropColor } from '../../util/thumbBackdrop';
-import { miniPlaceholderOf } from '../../util/miniThumbPlaceholder';
+import { MINI_PLACEHOLDER_BLUR, miniPlaceholderOf } from '../../util/miniThumbPlaceholder';
+import { thumbPathFor } from '../../util/mediaThumbChannel';
+import {
+  progressForOr, subscribeProgress, subscribeThumbActive, thumbActiveFor
+} from '../../util/mediaProgressChannel';
 import { AlbumCellRenderData } from '../../util/albumCellRenderData';
 import { MessageBubbleActions } from './ReusableMessageBubble';
 import { LiveThumbImage, LiveThumbSpec } from './LiveThumbImage';
@@ -10,7 +14,6 @@ import { PLAY_SLOT_ENTER_RATIO, PLAY_SLOT_KEEP_RATIO } from './playSlot';
 import { formatFileSize } from '../../util/formatFileSize';
 import { formatMediaDuration } from '../../util/mediaDuration';
 import { str } from '../../util/strings';
-import { chatEnv } from '../../util/chatEnvMirror';
 
 // 相册里的一格。
 //
@@ -51,11 +54,80 @@ export struct AlbumCellView {
   @Require @Param hooks: AlbumCellHooks;
   // 多选态、勾选和媒体标量均由单格输入提供；不再读取整组的并行数组。
   private cachedThumbSpec: LiveThumbSpec | null = null;
-  private metaBytes: number = -1;
-  private metaDuration: number = -1;
-  private metaWide: boolean = false;
-  private metaLangEpoch: number = -1;
-  private metaText: string = '';
+  @Local private liveVideoProgress: number = 0;
+  @Local private liveVideoActive: boolean = false;
+  private attachedVideoFileId: number = 0;
+  private unsubVideoProgress: (() => void) | null = null;
+  private unsubVideoActive: (() => void) | null = null;
+  private lastMediaRatio: number = 0;
+  private badgeTapAt: number = 0;
+
+  private attachVideoState(): void {
+    const nextFileId: number = this.cell.isVideo ? this.cell.videoFileId : 0;
+    if (this.attachedVideoFileId === nextFileId && nextFileId !== 0) {
+      this.liveVideoProgress = progressForOr(nextFileId, this.liveVideoProgress);
+      this.liveVideoActive = this.liveVideoProgress < 100 && thumbActiveFor(nextFileId);
+      return;
+    }
+    this.detachVideoState();
+    if (nextFileId === 0) {
+      this.liveVideoProgress = 0;
+      this.liveVideoActive = false;
+      return;
+    }
+    this.attachedVideoFileId = nextFileId;
+    this.liveVideoProgress = progressForOr(nextFileId, 0);
+    this.liveVideoActive = this.liveVideoProgress < 100 && thumbActiveFor(nextFileId);
+    this.unsubVideoProgress = subscribeProgress(nextFileId, (percent: number): void => {
+      const wasIncomplete: boolean = this.liveVideoProgress < 100;
+      this.liveVideoProgress = percent;
+      if (percent >= 100) {
+        this.liveVideoActive = false;
+        if (wasIncomplete && this.lastMediaRatio > 0) {
+          this.actions.onMediaRatio(this.memberId(), this.idx(), this.lastMediaRatio,
+            this.hooks.centerYOf(this.idx()));
+        }
+      }
+    });
+    this.unsubVideoActive = subscribeThumbActive(nextFileId, (active: boolean): void => {
+      this.liveVideoActive = this.liveVideoProgress < 100 && active;
+    });
+  }
+
+  private detachVideoState(): void {
+    if (this.unsubVideoProgress !== null) {
+      this.unsubVideoProgress();
+      this.unsubVideoProgress = null;
+    }
+    if (this.unsubVideoActive !== null) {
+      this.unsubVideoActive();
+      this.unsubVideoActive = null;
+    }
+    this.attachedVideoFileId = 0;
+  }
+
+  aboutToAppear(): void {
+    this.attachVideoState();
+  }
+
+  aboutToDisappear(): void {
+    this.detachVideoState();
+  }
+
+  aboutToRecycle(): void {
+    this.detachVideoState();
+    this.lastMediaRatio = 0;
+  }
+
+  aboutToReuse(): void {
+    this.lastMediaRatio = 0;
+    this.attachVideoState();
+  }
+
+  @Monitor('cell')
+  onCellChanged(): void {
+    this.attachVideoState();
+  }
 
   // 每格只保留一份输入。勾选/进度/播放角标变化不再制造新 spec，避免下层
   // Monitor 和图片属性无效刷新；命中前不创建临时对象，也不持有整条消息。
@@ -93,7 +165,8 @@ export struct AlbumCellView {
   // Loading ring shown centered on a media placeholder while its thumbnail
   // downloads — same style as the fullscreen viewer's (percent inside the ring).
   @Builder
-  mediaLoadState(size: number, fileId: number, initialPercent: number, failed: boolean) {
+  mediaLoadState(size: number, fileId: number, initialPercent: number, failed: boolean,
+    showDownloadIcon: boolean = false) {
     if (failed) {
       Column({ space: 3 }) {
         SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(Math.max(17, size * 0.5))
@@ -104,7 +177,12 @@ export struct AlbumCellView {
       .backgroundColor('#80000000').borderRadius(18);
     } else {
       // 进度不进 key，环自己订阅自己更新（见 LiveProgressRing / collapseAlbums）。
-      LiveProgressRing({ fileId: fileId, initialPercent: initialPercent, ringSize: size });
+      LiveProgressRing({
+        fileId: fileId,
+        initialPercent: initialPercent,
+        ringSize: size,
+        showDownloadIcon: showDownloadIcon
+      });
     }
   }
 
@@ -169,6 +247,13 @@ export struct AlbumCellView {
     return this.pathAt() === '' && this.failed() && this.fileId() !== 0;
   }
 
+  private photoNeedsDownloadTap(): boolean {
+    return !this.isVideo() &&
+      this.fileId() !== 0 &&
+      this.pathAt() === '' &&
+      thumbPathFor(this.fileId()) === '';
+  }
+
   private videoFileId(): number {
     return this.cell.videoFileId;
   }
@@ -179,28 +264,91 @@ export struct AlbumCellView {
     return this.cell.isPlaySlot;
   }
 
-  private videoMetaText(): string {
-    const bytes: number = this.cell.videoFileSize;
-    const durationSec: number = this.cell.videoDuration;
-    const wide: boolean = this.cell.width >= 112;
-    // Read every input before the hit, including the observed language epoch.
-    // The condition and Text share one result without retaining a message.
-    const langEpoch: number = chatEnv.langEpoch;
-    if (this.metaBytes === bytes && this.metaDuration === durationSec &&
-      this.metaWide === wide && this.metaLangEpoch === langEpoch) {
-      return this.metaText;
+  private isWideVideoCell(): boolean {
+    return this.cell.width >= 130 && this.cell.height >= 100;
+  }
+
+  private showVideoDownloadPill(): boolean {
+    return this.isVideo() &&
+      !this.isLive() &&
+      !this.uploading() &&
+      this.isWideVideoCell() &&
+      this.liveVideoProgress < 100;
+  }
+
+  private videoDownloadSubtext(): string {
+    const hasProgress: boolean = this.liveVideoActive ||
+      (this.liveVideoProgress > 0 && this.liveVideoProgress < 100);
+    if (hasProgress && this.cell.videoFileSize > 0) {
+      return `${this.liveVideoProgress}% · ${formatFileSize(this.cell.videoFileSize)}`;
     }
-    const size: string = bytes > 0 ? formatFileSize(bytes) : '';
-    const duration: string = durationSec <= 0 ? '' : formatMediaDuration(durationSec);
-    // 三列等窄格优先保证 issue #93 要求的文件大小可见；宽格与单视频一致。
-    const text: string = durationSec <= 0 ? size : (size !== '' && wide
-      ? `${duration} · ${size}` : (size !== '' ? size : duration));
-    this.metaBytes = bytes;
-    this.metaDuration = durationSec;
-    this.metaWide = wide;
-    this.metaLangEpoch = langEpoch;
-    this.metaText = text;
-    return text;
+    if (hasProgress) {
+      return `${this.liveVideoProgress}%`;
+    }
+    if (this.cell.videoFileSize > 0) {
+      return formatFileSize(this.cell.videoFileSize);
+    }
+    return str('AttachVideo');
+  }
+
+  private videoCompactDurationText(): string {
+    return this.cell.videoDuration > 0 ? formatMediaDuration(this.cell.videoDuration) : '';
+  }
+
+  @Builder
+  videoTopLeftBadge() {
+    if (this.showVideoDownloadPill()) {
+      Row({ space: 6 }) {
+        if (this.liveVideoActive) {
+          Progress({ value: this.liveVideoProgress, total: 100, type: ProgressType.Ring })
+            .width(18).height(18).color(Color.White);
+        } else {
+          SymbolGlyph($r('sys.symbol.cloud_and_arrow_down'))
+            .fontSize(17).fontColor([Color.White]);
+        }
+        Column({ space: 1 }) {
+          Text(formatMediaDuration(this.cell.videoDuration))
+            .fontSize(10.5).fontWeight(FontWeight.Medium).fontColor(Color.White)
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis });
+          Text(this.videoDownloadSubtext())
+            .fontSize(9.5).fontColor('#E6FFFFFF')
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis });
+        }
+        .alignItems(HorizontalAlign.Start)
+        .constraintSize({ maxWidth: Math.max(36, this.cell.width - 42) });
+      }
+      .alignItems(VerticalAlign.Center)
+      .backgroundColor('#73000000')
+      .borderRadius(9)
+      .padding({ left: 7, right: 8, top: 3, bottom: 3 })
+      .position({ x: 6, y: 6 })
+      .onClick((): void => {
+        this.badgeTapAt = Date.now();
+        if (this.hooks.isClaimed()) {
+          return;
+        }
+        if (this.cell.selectionActive) {
+          this.hooks.onToggleMember(this.memberId());
+          return;
+        }
+        if (this.liveVideoActive) {
+          this.actions.onFilePause(this.memberId());
+        } else {
+          this.actions.onVideoRetry(this.memberId());
+        }
+      });
+    } else if (this.videoCompactDurationText() !== '') {
+      Text(this.videoCompactDurationText())
+        .fontSize(10.5)
+        .fontColor(Color.White)
+        .backgroundColor('#66000000')
+        .borderRadius(6)
+        .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .constraintSize({ maxWidth: Math.max(24, this.cell.width - 12) })
+        .position({ x: 6, y: this.isLive() ? 28 : 6 });
+    }
   }
 
   // 占位底。两个变体只差 hasFile 一个条件，但**必须各自是零参 @Builder**——
@@ -213,16 +361,25 @@ export struct AlbumCellView {
   @Builder
   placeholderWithFile() {
     Stack() {
+      if (miniPlaceholderOf(this.cell.mini) !== '') {
+        Image(miniPlaceholderOf(this.cell.mini))
+          .draggable(false)
+          .width(this.cell.width).height(this.cell.height)
+          .borderRadius(6).clip(true)
+          .objectFit(ImageFit.Cover)
+          .blur(MINI_PLACEHOLDER_BLUR);
+      }
       if (!this.failed()) {
         this.mediaLoadState(
           Math.min(34, Math.min(this.cell.width, this.cell.height) * 0.4),
           this.fileId(),
           this.cell.progress,
-          false
+          false,
+          !this.isVideo()
         );
       } else if (!this.isVideo()) {
         this.mediaLoadState(
-          Math.min(34, Math.min(this.cell.width, this.cell.height) * 0.4), 0, 0, true);
+          Math.min(34, Math.min(this.cell.width, this.cell.height) * 0.4), 0, 0, true, false);
       }
     }.width(this.cell.width).height(this.cell.height).borderRadius(6)
       .backgroundColor(thumbBackdropColor(this.isVideo()));
@@ -300,17 +457,8 @@ export struct AlbumCellView {
     if (this.isLive()) {
       this.liveChip();
     }
-    if (this.isVideo() && this.videoMetaText() !== '') {
-      Text(this.metaText)
-        .fontSize(10.5)
-        .fontColor(Color.White)
-        .backgroundColor('#66000000')
-        .borderRadius(6)
-        .padding({ left: 5, right: 5, top: 1, bottom: 1 })
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .constraintSize({ maxWidth: Math.max(24, this.cell.width - 12) })
-        .position({ x: 6, y: Math.max(6, this.cell.height - 23) });
+    if (this.isVideo()) {
+      this.videoTopLeftBadge();
     }
   }
 
@@ -352,7 +500,7 @@ export struct AlbumCellView {
   }
 
   private onCellTap(e: ClickEvent): void {
-    if (this.hooks.isClaimed()) {
+    if (this.hooks.isClaimed() || Date.now() - this.badgeTapAt < 80) {
       return;
     }
     // 多选态下点一格 = 只切这一张。此时不打开查看器、也不触发重试。
@@ -360,8 +508,8 @@ export struct AlbumCellView {
       this.hooks.onToggleMember(this.memberId());
       return;
     }
-    // 失败的格子提供重试（与单图一致）。
-    if (this.retryable()) {
+    // 失败的格子提供重试，未自动下载的图片格点击直接原地下载（与单图一致）。
+    if (this.retryable() || this.photoNeedsDownloadTap()) {
       this.actions.onSpecialPhotoRetry(this.memberId());
       return;
     }
@@ -392,6 +540,7 @@ export struct AlbumCellView {
           { ratios: [0.0, PLAY_SLOT_KEEP_RATIO, PLAY_SLOT_ENTER_RATIO, 0.9],
             expectedUpdateInterval: 200 },
           (_visible: boolean, ratio: number): void => {
+            this.lastMediaRatio = ratio;
             if (ratio <= 0) {
               this.actions.onMediaGone(this.memberId(), this.idx());
             } else {

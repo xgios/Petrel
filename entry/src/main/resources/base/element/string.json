@@ -13327,6 +13327,78 @@
     {
       "name": "cp_search_results",
       "value": "搜索结果"
+    },
+    {
+      "name": "ds_auto_download_media",
+      "value": "自动下载媒体文件"
+    },
+    {
+      "name": "ds_auto_download_photos",
+      "value": "照片"
+    },
+    {
+      "name": "ds_auto_download_all_on",
+      "value": "对所有聊天启用"
+    },
+    {
+      "name": "ds_auto_download_all_off",
+      "value": "对所有聊天关闭"
+    },
+    {
+      "name": "ds_auto_download_private",
+      "value": "私聊"
+    },
+    {
+      "name": "ds_auto_download_group",
+      "value": "群聊"
+    },
+    {
+      "name": "ds_auto_download_channel",
+      "value": "频道"
+    },
+    {
+      "name": "ds_auto_download_videos",
+      "value": "视频"
+    },
+    {
+      "name": "ds_auto_download_video_all_max",
+      "value": "所有聊天最大 %1$s"
+    },
+    {
+      "name": "ds_auto_download_video_scopes_max",
+      "value": "%1$s 最大 %2$s"
+    },
+    {
+      "name": "ds_video_size_limit",
+      "value": "大小限制"
+    },
+    {
+      "name": "ds_video_preload_large",
+      "value": "预先载入较大的视频"
+    },
+    {
+      "name": "ds_video_preload_size",
+      "value": "预载入大小"
+    },
+    {
+      "name": "ds_video_preload_large_hint",
+      "value": "预先加载大于 %1$s 前几秒 (%2$s) 的视频以便即时播放。"
+    },
+    {
+      "name": "ds_auto_download_files",
+      "value": "文件"
+    },
+    {
+      "name": "ds_auto_download_file_scopes_max",
+      "value": "不超过 %1$s 的 %2$s"
+    },
+    {
+      "name": "ds_reset_auto_download",
+      "value": "重置自动下载设置"
+    },
+    {
+      "name": "ds_reset_auto_download_confirm",
+      "value": "撤消全部自定义自动下载设置"
     }
   ]
 }

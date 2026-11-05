@@ -9,8 +9,33 @@ import {
   KEY_CACHE_LIMIT, powerAnimationDuration,
   KEY_POWER_SMOOTH_TRANSITIONS,
   setBoolean, setNumber,
-  KEY_AUTOSAVE_PRIVATE, KEY_AUTOSAVE_GROUP, KEY_AUTOSAVE_CHANNEL
+  KEY_AUTOSAVE_PRIVATE, KEY_AUTOSAVE_GROUP, KEY_AUTOSAVE_CHANNEL,
+  KEY_AUTODOWNLOAD_MASTER,
+  KEY_AUTODOWNLOAD_PHOTO_PRIVATE,
+  KEY_AUTODOWNLOAD_PHOTO_GROUP,
+  KEY_AUTODOWNLOAD_PHOTO_CHANNEL,
+  KEY_AUTODOWNLOAD_VIDEO_PRIVATE,
+  KEY_AUTODOWNLOAD_VIDEO_GROUP,
+  KEY_AUTODOWNLOAD_VIDEO_CHANNEL,
+  KEY_AUTODOWNLOAD_VIDEO_MAX_MB,
+  KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE,
+  KEY_AUTODOWNLOAD_VIDEO_PRELOAD_MB,
+  KEY_AUTODOWNLOAD_FILE_PRIVATE,
+  KEY_AUTODOWNLOAD_FILE_GROUP,
+  KEY_AUTODOWNLOAD_FILE_CHANNEL,
+  KEY_AUTODOWNLOAD_FILE_MAX_MB,
+  resetAutoDownloadSettings
 } from '../../store/AppSettings';
+import {
+  AUTODOWNLOAD_FILE_MAX_MB_DEFAULT,
+  AUTODOWNLOAD_VIDEO_MAX_MB_DEFAULT,
+  AUTODOWNLOAD_VIDEO_PRELOAD_MB_DEFAULT,
+  fileAutoDownloadSubtitle,
+  isAutoDownloadAtDefault,
+  photoAutoDownloadSubtitle,
+  videoAutoDownloadSubtitle
+} from '../../util/autoDownloadPolicy';
+import { navigateToSetting } from '../../util/settingsNav';
 import {
   CACHE_LIMIT_OPTIONS, CACHE_LIMIT_UNLIMITED, CACHE_LIMIT_DEFAULT
 } from '../../store/CacheLimit';
@@ -50,6 +75,20 @@ export struct DataStoragePage {
   @StorageProp('topSafeHeight') topSafe: number = 0;
   @StorageProp('bottomSafeHeight') bottomSafe: number = 0;
   @StorageProp(KEY_CACHE_LIMIT) cacheLimit: number = CACHE_LIMIT_DEFAULT;
+  @StorageProp(KEY_AUTODOWNLOAD_MASTER) autoDownloadMaster: boolean = true;
+  @StorageProp(KEY_AUTODOWNLOAD_PHOTO_PRIVATE) autoDownloadPhotoPrivate: boolean = true;
+  @StorageProp(KEY_AUTODOWNLOAD_PHOTO_GROUP) autoDownloadPhotoGroup: boolean = true;
+  @StorageProp(KEY_AUTODOWNLOAD_PHOTO_CHANNEL) autoDownloadPhotoChannel: boolean = true;
+  @StorageProp(KEY_AUTODOWNLOAD_VIDEO_PRIVATE) autoDownloadVideoPrivate: boolean = true;
+  @StorageProp(KEY_AUTODOWNLOAD_VIDEO_GROUP) autoDownloadVideoGroup: boolean = true;
+  @StorageProp(KEY_AUTODOWNLOAD_VIDEO_CHANNEL) autoDownloadVideoChannel: boolean = true;
+  @StorageProp(KEY_AUTODOWNLOAD_VIDEO_MAX_MB) autoDownloadVideoMaxMb: number = AUTODOWNLOAD_VIDEO_MAX_MB_DEFAULT;
+  @StorageProp(KEY_AUTODOWNLOAD_VIDEO_PRELOAD_LARGE) autoDownloadVideoPreloadLarge: boolean = true;
+  @StorageProp(KEY_AUTODOWNLOAD_VIDEO_PRELOAD_MB) autoDownloadVideoPreloadMb: number = AUTODOWNLOAD_VIDEO_PRELOAD_MB_DEFAULT;
+  @StorageProp(KEY_AUTODOWNLOAD_FILE_PRIVATE) autoDownloadFilePrivate: boolean = false;
+  @StorageProp(KEY_AUTODOWNLOAD_FILE_GROUP) autoDownloadFileGroup: boolean = false;
+  @StorageProp(KEY_AUTODOWNLOAD_FILE_CHANNEL) autoDownloadFileChannel: boolean = false;
+  @StorageProp(KEY_AUTODOWNLOAD_FILE_MAX_MB) autoDownloadFileMaxMb: number = AUTODOWNLOAD_FILE_MAX_MB_DEFAULT;
   @State storage: StorageUsage | null = null;
   @State network: NetworkUsage | null = null;
   @State storageLoading: boolean = true;
@@ -275,6 +314,43 @@ export struct DataStoragePage {
     return str('ds_since', fullDate(date));
   }
 
+  private canResetAutoDownload(): boolean {
+    return !isAutoDownloadAtDefault(
+      this.autoDownloadMaster,
+      this.autoDownloadPhotoPrivate,
+      this.autoDownloadPhotoGroup,
+      this.autoDownloadPhotoChannel,
+      this.autoDownloadVideoPrivate,
+      this.autoDownloadVideoGroup,
+      this.autoDownloadVideoChannel,
+      this.autoDownloadVideoMaxMb,
+      this.autoDownloadVideoPreloadLarge,
+      this.autoDownloadVideoPreloadMb,
+      this.autoDownloadFilePrivate,
+      this.autoDownloadFileGroup,
+      this.autoDownloadFileChannel,
+      this.autoDownloadFileMaxMb
+    );
+  }
+
+  private promptResetAutoDownload(): void {
+    if (!this.canResetAutoDownload()) {
+      return;
+    }
+    promptAction.showDialog({
+      title: $r('app.string.EntryAbility_label'),
+      message: $r('app.string.ds_reset_auto_download_confirm'),
+      buttons: [
+        { text: $r('app.string.cancel'), color: COLOR_TEXT_SECONDARY as string },
+        { text: $r('app.string.color_picker_confirm'), color: COLOR_PRIMARY as string }
+      ]
+    }).then((result: promptAction.ShowDialogSuccessResponse): void => {
+      if (result.index === 1) {
+        resetAutoDownloadSettings();
+      }
+    });
+  }
+
   private confirmAction(key: string, title: ResourceStr, message: ResourceStr, button: ResourceStr,
     color: string, operation: () => Promise<void>, success: ResourceStr): void {
     if (this.actionKey !== '') { return; }
@@ -447,6 +523,153 @@ export struct DataStoragePage {
     }.width('100%').backgroundColor(COLOR_SURFACE).borderRadius(CARD_RADIUS).clip(true);
   }
 
+  private onMasterAutoDownloadChange(next: boolean): void {
+    if (this.autoDownloadMaster === next) {
+      return;
+    }
+    setBoolean(KEY_AUTODOWNLOAD_MASTER, next);
+    if (next) {
+      const photosAllOff: boolean =
+        !this.autoDownloadPhotoPrivate && !this.autoDownloadPhotoGroup && !this.autoDownloadPhotoChannel;
+      const videosAllOff: boolean =
+        !this.autoDownloadVideoPrivate && !this.autoDownloadVideoGroup && !this.autoDownloadVideoChannel;
+      const filesAllOff: boolean =
+        !this.autoDownloadFilePrivate && !this.autoDownloadFileGroup && !this.autoDownloadFileChannel;
+      if (photosAllOff && videosAllOff && filesAllOff) {
+        setBoolean(KEY_AUTODOWNLOAD_PHOTO_PRIVATE, true);
+        setBoolean(KEY_AUTODOWNLOAD_PHOTO_GROUP, true);
+        setBoolean(KEY_AUTODOWNLOAD_PHOTO_CHANNEL, true);
+        setBoolean(KEY_AUTODOWNLOAD_VIDEO_PRIVATE, true);
+        setBoolean(KEY_AUTODOWNLOAD_VIDEO_GROUP, true);
+        setBoolean(KEY_AUTODOWNLOAD_VIDEO_CHANNEL, true);
+      }
+    }
+  }
+
+  @Builder
+  autoDownloadCard() {
+    Column() {
+      Row({ space: 10 }) {
+        Text($r('app.string.ds_auto_download_media'))
+          .fontSize(15)
+          .fontColor(COLOR_TEXT_PRIMARY)
+          .layoutWeight(1);
+        Toggle({ type: ToggleType.Switch, isOn: this.autoDownloadMaster })
+          .selectedColor(COLOR_PRIMARY)
+          .onChange((next: boolean): void => this.onMasterAutoDownloadChange(next));
+      }
+      .width('100%')
+      .height(48)
+      .padding({ left: 14, right: 14 });
+      Divider().strokeWidth(0.5).color(COLOR_DIVIDER).margin({ left: 14 });
+      Row({ space: 10 }) {
+        Column({ space: 2 }) {
+          Text($r('app.string.ds_auto_download_photos'))
+            .fontSize(15)
+            .fontColor(COLOR_TEXT_PRIMARY);
+          Text(photoAutoDownloadSubtitle(
+            this.autoDownloadMaster,
+            this.autoDownloadPhotoPrivate,
+            this.autoDownloadPhotoGroup,
+            this.autoDownloadPhotoChannel
+          ))
+            .fontSize(12)
+            .fontColor(COLOR_TEXT_SECONDARY)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis });
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start);
+        SymbolGlyph($r('sys.symbol.chevron_right'))
+          .fontSize(15)
+          .fontColor([COLOR_ICON_SECONDARY]);
+      }
+      .width('100%')
+      .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+      .stateStyles({ normal: this.rowNormalStyle, pressed: this.rowPressedStyle })
+      .onClick((): void => {
+        navigateToSetting('AutoDownloadPhotoPage', undefined, 'content');
+      });
+      Divider().strokeWidth(0.5).color(COLOR_DIVIDER).margin({ left: 14 });
+      Row({ space: 10 }) {
+        Column({ space: 2 }) {
+          Text($r('app.string.ds_auto_download_videos'))
+            .fontSize(15)
+            .fontColor(COLOR_TEXT_PRIMARY);
+          Text(videoAutoDownloadSubtitle(
+            this.autoDownloadMaster,
+            this.autoDownloadVideoPrivate,
+            this.autoDownloadVideoGroup,
+            this.autoDownloadVideoChannel,
+            this.autoDownloadVideoMaxMb
+          ))
+            .fontSize(12)
+            .fontColor(COLOR_TEXT_SECONDARY)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis });
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start);
+        SymbolGlyph($r('sys.symbol.chevron_right'))
+          .fontSize(15)
+          .fontColor([COLOR_ICON_SECONDARY]);
+      }
+      .width('100%')
+      .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+      .stateStyles({ normal: this.rowNormalStyle, pressed: this.rowPressedStyle })
+      .onClick((): void => {
+        navigateToSetting('AutoDownloadVideoPage', undefined, 'content');
+      });
+      Divider().strokeWidth(0.5).color(COLOR_DIVIDER).margin({ left: 14 });
+      Row({ space: 10 }) {
+        Column({ space: 2 }) {
+          Text($r('app.string.ds_auto_download_files'))
+            .fontSize(15)
+            .fontColor(COLOR_TEXT_PRIMARY);
+          Text(fileAutoDownloadSubtitle(
+            this.autoDownloadMaster,
+            this.autoDownloadFilePrivate,
+            this.autoDownloadFileGroup,
+            this.autoDownloadFileChannel,
+            this.autoDownloadFileMaxMb
+          ))
+            .fontSize(12)
+            .fontColor(COLOR_TEXT_SECONDARY)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis });
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start);
+        SymbolGlyph($r('sys.symbol.chevron_right'))
+          .fontSize(15)
+          .fontColor([COLOR_ICON_SECONDARY]);
+      }
+      .width('100%')
+      .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+      .stateStyles({ normal: this.rowNormalStyle, pressed: this.rowPressedStyle })
+      .onClick((): void => {
+        navigateToSetting('AutoDownloadFilePage', undefined, 'content');
+      });
+      Divider().strokeWidth(0.5).color(COLOR_DIVIDER).margin({ left: 14 });
+      Row() {
+        Text($r('app.string.ds_reset_auto_download'))
+          .fontSize(15)
+          .fontColor(this.canResetAutoDownload() ? COLOR_PRIMARY : COLOR_TEXT_SECONDARY);
+      }
+      .width('100%')
+      .padding({ left: 14, right: 14, top: 12, bottom: 12 })
+      .enabled(this.canResetAutoDownload())
+      .stateStyles({ normal: this.rowNormalStyle, pressed: this.rowPressedStyle })
+      .onClick((): void => {
+        this.promptResetAutoDownload();
+      });
+    }
+    .width('100%')
+    .backgroundColor(COLOR_SURFACE)
+    .borderRadius(CARD_RADIUS)
+    .clip(true);
+  }
+
   @Builder
   downloadPathCard() {
     Row({ space: 12 }) {
@@ -557,6 +780,9 @@ export struct DataStoragePage {
             this.overviewCard();
             this.statsCard();
           }
+          Text($r('app.string.ds_auto_download_media')).fontSize(14).fontWeight(FontWeight.Medium).fontColor(COLOR_PRIMARY)
+            .width('100%').padding({ left: 4, top: 4 });
+          this.autoDownloadCard();
           this.actionsCard();
           this.limitCard();
           this.autosaveWarningCard();

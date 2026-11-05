@@ -5,7 +5,8 @@ import { sendWithChatPermissions, requireSendPermissions, showSendPermissionErro
 import { TdClient, TIMEOUT_ERROR_CODE } from '../tdkit/TdClient';
 import { publishViewCount } from '../util/viewCountChannel';
 import { interactionChanged } from '../util/interactionDelta';
-import { isBackgroundCaching } from './CacheRegistry';
+import { cacheRecordFor, forgetCachedMedia, isBackgroundCaching, noteCachedMedia } from './CacheRegistry';
+import { kindOfContentType } from '../util/downloadCenterModel';
 import { stickerSetIdOf } from '../util/stickerSetItems';
 import { viewMessageSourceType } from '../util/viewMessageSource';
 import { TdObject, TdRequest, TdError } from '../tdkit/TdTypes';
@@ -36,7 +37,12 @@ import { decideMedia, subjectOfEntry, MediaContext, MediaIntent } from './MediaP
 import { PollOptionInfo } from '../util/formatMsgContent';
 import { reactionTypeOf } from '../util/reactions';
 import { str } from '../util/strings';
-import { publishProgress } from '../util/mediaProgressChannel';
+import { publishProgress, publishThumbActive, progressForOr } from '../util/mediaProgressChannel';
+import {
+  shouldAutoDownloadFile, shouldAutoDownloadFullVideo, shouldAutoDownloadPhoto,
+  subscribeAutoDownloadChanged
+} from '../util/autoDownloadPolicy';
+import { isLivePhotoVideo } from '../util/livePhoto';
 import { uploadPercentOf } from '../util/uploadProgress';
 import { publishSendState } from '../util/sendStateChannel';
 import { logE, logI, logW } from '../util/log';
@@ -527,6 +533,9 @@ export class MessageStore {
       }
     }));
     this.unsubs.push(this.client.onUpdate('updateMessageEdited', (u: TdObject) => this.onEdited(u)));
+    this.unsubs.push(subscribeAutoDownloadChanged((): void => {
+      this.onAutoDownloadPolicyChanged();
+    }));
     // Bot showed/removed its custom reply keyboard.
     this.unsubs.push(this.client.onUpdate('updateChatReplyMarkup', (u: TdObject) => this.onChatReplyMarkup(u)));
     // 会话最后一条变了：可能因此已经追到尾部，重新判一次。
@@ -3890,6 +3899,7 @@ export class MessageStore {
   }
 
   private downloadThumb(fileId: number): void {
+    publishThumbActive(fileId, true);
     if (this.thumbQueued.has(fileId)) {
       return; // 已在队列或在途
     }
@@ -3948,6 +3958,7 @@ export class MessageStore {
       if (attempt <= 2) {
         setTimeout(() => this.downloadThumb(fileId), 1000 * attempt);
       } else {
+        publishThumbActive(fileId, false);
         this.setThumbnailFailed(fileId, true);
         // 三次都不行，多半不是网络而是 id 过期——换新 id 再来（issue #68）。
         this.refreshMessageForFile(fileId, this.fileToMsg.get(fileId) ?? 0);
@@ -4355,6 +4366,36 @@ export class MessageStore {
   // 已进 TDLib 下载管理器（addFileToDownloads）的文件。用户明确要留下来的，
   // 本地不去取消它们。
   private managedFiles: Set<number> = new Set();
+  // 用户在气泡中手动点击暂停过的文件/视频：滚动触发 requestPhotos 时不再自动重下，
+  // 只有用户再次手动点击继续时才清除。
+  private userPausedFiles: Set<number> = new Set();
+  // 已登记到下载中心缓存记录（CacheRegistry）的文件，避免滚动时重复查找。
+  private notedCacheFiles: Set<number> = new Set();
+  // 用户在气泡中主动点击下载的照片缩略图（自动下载关闭时单张放行）。
+  private userRequestedThumbs: Set<number> = new Set();
+
+  private noteCacheForEntry(e: MessageEntry): void {
+    if (e.videoFileId === 0 || this.chatId === 0) {
+      return;
+    }
+    if (e.contentType !== 'file' && e.contentType !== 'audio' &&
+      !(e.contentType === 'video' && !e.isAnimation && !isLivePhotoVideo(e.videoFileName, e.videoDuration))) {
+      return;
+    }
+    this.notedCacheFiles.add(e.videoFileId);
+    noteCachedMedia({
+      fileId: e.videoFileId,
+      chatId: this.chatId,
+      messageId: e.id,
+      kind: kindOfContentType(e.contentType),
+      name: e.videoFileName,
+      size: e.videoFileSize,
+      mimeType: e.videoMimeType,
+      preview: e.text,
+      background: false,
+      addedAt: Date.now()
+    });
+  }
 
   private mediaContextFor(entry: MessageEntry): MediaContext {
     return {
@@ -4415,6 +4456,9 @@ export class MessageStore {
         continue;
       }
       this.videoFileToMsg.delete(fileId);
+      if (progressForOr(fileId, 0) <= 0) {
+        forgetCachedMedia(fileId);
+      }
       const req: TdRequest = { '@type': 'cancelDownloadFile' };
       req['file_id'] = fileId;
       req['only_if_pending'] = false;
@@ -4429,13 +4473,17 @@ export class MessageStore {
   private requestPhotos(): void {
     this.resolveCustomEmojis();
     this.resolveContactAvatars();
+    const autoDownloadPhotos: boolean = shouldAutoDownloadPhoto(this.isGroupFlag, this.isChannel);
     for (const e of this.messages) {
-      if ((e.contentType === 'photo' || e.contentType === 'video' ||
+      const isPhotoMsg: boolean = e.contentType === 'photo';
+      const allowPhotoThumb: boolean = !isPhotoMsg || e.isOutgoing ||
+        this.userRequestedThumbs.has(e.photoFileId) || autoDownloadPhotos;
+      if ((isPhotoMsg || e.contentType === 'video' ||
         e.contentType === 'videoNote' ||
         e.contentType === 'sticker' || e.contentType === 'audio' ||
         e.contentType === 'game' || e.contentType === 'paidMedia' ||
         e.contentType === 'gift' || e.contentType === 'giveaway')
-        && e.photoFileId !== 0 && e.photoPath === '') {
+        && e.photoFileId !== 0 && e.photoPath === '' && allowPhotoThumb) {
         if (!this.fileToMsg.has(e.photoFileId)) {
           this.fileToMsg.set(e.photoFileId, e.id);
           this.downloadThumb(e.photoFileId);
@@ -4468,11 +4516,31 @@ export class MessageStore {
       //   · 窗口内若 !needsVideo，它最多产出 'thumb'，而这里只消费 'explicit'
       //     （'thumb' 的真正入队在本循环上半段，MediaPolicy 注释里写明了）。
       // 两者任一不成立，这一段本来就什么都不做。
-      if (e.videoFileId !== 0 && e.videoPath === '' && this.inMediaWindow(e.id)) {
-        const intents: MediaIntent[] = decideMedia(subjectOfEntry(e), this.mediaContextFor(e));
-        for (const intent of intents) {
-          if (intent === 'explicit') {
-            this.requestVideoDownload(e.id); // deduped via videoFileToMsg
+      if (e.videoFileId !== 0 && this.inMediaWindow(e.id)) {
+        if (e.videoPath !== '') {
+          if (!this.notedCacheFiles.has(e.videoFileId)) {
+            this.notedCacheFiles.add(e.videoFileId);
+            if (cacheRecordFor(e.videoFileId) === undefined) {
+              this.noteCacheForEntry(e);
+            }
+          }
+        } else if (e.contentType === 'video' && !e.isAnimation && !e.videoFailed &&
+          !isLivePhotoVideo(e.videoFileName, e.videoDuration)) {
+          if (!this.userPausedFiles.has(e.videoFileId) &&
+            shouldAutoDownloadFullVideo(this.isGroupFlag, this.isChannel, e.videoFileSize)) {
+            this.requestVideoDownload(e.id);
+          }
+        } else if (e.contentType === 'file') {
+          if (!e.videoFailed && !this.userPausedFiles.has(e.videoFileId) &&
+            shouldAutoDownloadFile(this.isGroupFlag, this.isChannel, e.videoFileSize)) {
+            this.requestVideoDownload(e.id);
+          }
+        } else {
+          const intents: MediaIntent[] = decideMedia(subjectOfEntry(e), this.mediaContextFor(e));
+          for (const intent of intents) {
+            if (intent === 'explicit') {
+              this.requestVideoDownload(e.id); // deduped via videoFileToMsg
+            }
           }
         }
       }
@@ -4521,6 +4589,52 @@ export class MessageStore {
           }
         }
       }
+    }
+  }
+
+  private onAutoDownloadPolicyChanged(): void {
+    const cancelFileIds: number[] = [];
+    this.videoFileToMsg.forEach((messageId: number, fileId: number): void => {
+      if (this.userRequestedFiles.has(fileId) || this.managedFiles.has(fileId) ||
+        isBackgroundCaching(fileId)) {
+        return;
+      }
+      const idx: number = this.indexOf(messageId);
+      if (idx < 0) {
+        return;
+      }
+      const entry: MessageEntry = this.messages[idx];
+      if (entry.videoPath !== '') {
+        return;
+      }
+      if (entry.contentType === 'video' && !entry.isAnimation &&
+        !isLivePhotoVideo(entry.videoFileName, entry.videoDuration)) {
+        if (!shouldAutoDownloadFullVideo(this.isGroupFlag, this.isChannel, entry.videoFileSize)) {
+          cancelFileIds.push(fileId);
+        }
+      } else if (entry.contentType === 'file') {
+        if (!shouldAutoDownloadFile(this.isGroupFlag, this.isChannel, entry.videoFileSize)) {
+          cancelFileIds.push(fileId);
+        }
+      }
+    });
+    for (const fileId of cancelFileIds) {
+      this.videoFileToMsg.delete(fileId);
+      if (progressForOr(fileId, 0) <= 0) {
+        forgetCachedMedia(fileId);
+      }
+      const req: TdRequest = { '@type': 'cancelDownloadFile' };
+      req['file_id'] = fileId;
+      req['only_if_pending'] = false;
+      this.client.send(req).catch((): void => { /* 取消失败无副作用 */ });
+      const pausedProgress: number = progressForOr(fileId, 0);
+      this.patchVideoEntries(fileId, (c: MessageEntry): void => {
+        c.mediaDownloadActive = false;
+        c.videoProgress = c.contentType === 'video' ? 0 : pausedProgress;
+      });
+    }
+    if (this.chatResolved) {
+      this.requestPhotos();
     }
   }
 
@@ -4641,6 +4755,8 @@ export class MessageStore {
     }
     if (e.photoFullFileId === 0 || e.photoFullPath !== '') {
       if (e.photoPath === '' && e.photoFileId !== 0) {
+        this.userRequestedThumbs.add(e.photoFileId);
+        publishThumbActive(e.photoFileId, true);
         this.fileToMsg.set(e.photoFileId, messageId);
         this.thumbLastKick.set(e.photoFileId, Date.now());
         if (priority >= MEDIA_VIEWING_PRIORITY) {
@@ -4739,6 +4855,7 @@ export class MessageStore {
       logE(`MessageStore full photo ${fullFileId}: ${err.message}`);
     });
     if (e.photoPath === '' && e.photoFileId !== 0) {
+      this.userRequestedThumbs.add(e.photoFileId);
       this.fileToMsg.set(e.photoFileId, messageId);
       this.thumbLastKick.set(e.photoFileId, Date.now());
       this.downloadThumb(e.photoFileId);
@@ -4752,15 +4869,19 @@ export class MessageStore {
     }
     const e: MessageEntry = this.messages[idx];
     if (e.photoPath === '' && e.photoFileId !== 0) {
+      this.userRequestedThumbs.add(e.photoFileId);
       this.fileToMsg.delete(e.photoFileId);
       this.thumbLastKick.delete(e.photoFileId);
       this.thumbAttempts.delete(e.photoFileId);
-      this.patch(messageId, (c: MessageEntry): void => {
-        c.photoFailed = false;
-        c.photoProgress = 0;
-      });
+      if (e.photoFailed || e.photoProgress !== 0) {
+        this.patch(messageId, (c: MessageEntry): void => {
+          c.photoFailed = false;
+          c.photoProgress = 0;
+        });
+      }
       this.fileToMsg.set(e.photoFileId, messageId);
       this.downloadThumb(e.photoFileId);
+      return;
     }
     if (e.photoFullPath === '' && e.photoFullFileId !== 0) {
       this.requestFullPhoto(messageId, true);
@@ -4944,6 +5065,7 @@ export class MessageStore {
     }
     this.userRequestedFiles.delete(fileId);
     this.videoFileToMsg.delete(fileId);
+    this.userPausedFiles.add(fileId);
     // **进了 TDLib 下载管理器的文件，光 cancelDownloadFile 停不住。**
     //
     // 2026-11-03 真机（issue #245）：在气泡上暂停一个 309MB 的文件，
@@ -4973,8 +5095,10 @@ export class MessageStore {
     // 还是 100；真正准确的是 mediaProgressChannel 里 downloadPercent 写进去的
     // 值。取消传输之后不会再有人覆盖它，通道里那条就是「停在哪」。
     // 之前那版用自己的旧值去 publish，反而把正确值盖掉了。
+    const pausedProgress: number = progressForOr(fileId, e.videoProgress);
     this.patchVideoEntries(fileId, (c: MessageEntry): void => {
       c.mediaDownloadActive = false;
+      c.videoProgress = pausedProgress;
     });
   }
 
@@ -5030,6 +5154,7 @@ export class MessageStore {
     const e = this.messages[idx];
     const cachedPath = e.videoFileId !== 0 ? (this.completedFilePaths.get(e.videoFileId) ?? '') : '';
     if (e.videoPath === '' && cachedPath !== '') {
+      this.noteCacheForEntry(e);
       this.patchVideoEntries(e.videoFileId, (c: MessageEntry): void => {
         c.videoPath = cachedPath;
         c.videoProgress = 100;
@@ -5043,6 +5168,9 @@ export class MessageStore {
     }
     if (e.videoFileId === 0 || e.videoPath !== '') {
       return;
+    }
+    if (manage || exempt || forceRetry) {
+      this.userPausedFiles.delete(e.videoFileId);
     }
     // 已经在下了（自动预取，或另一处先触发了）。意图仍然要记下来：不记的话
     // 关播放器时 releaseVideoPlayback 找不到该取消谁，视频就一直下下去。
@@ -5063,6 +5191,7 @@ export class MessageStore {
     if (manage) {
       this.managedFiles.add(e.videoFileId);
     }
+    this.noteCacheForEntry(e);
     // 之前可能在气泡里暂停过（见 pauseFileDownload 里的 toggleDownloadIsPaused）：
     // 现在要重新下载，必须先把暂停位清掉，否则 downloadFile 不会被真正执行。
     if (this.managedFiles.has(e.videoFileId)) {
@@ -5182,6 +5311,7 @@ export class MessageStore {
     const done = (local['is_downloading_completed'] as boolean | undefined) ?? false;
     const path = (local['path'] as string | undefined) ?? '';
     if (done && path !== '') {
+      publishThumbActive(id, false);
       const keepPoster: string = this.localVideoPosters.get(id) ?? '';
       this.completedFilePaths.set(id, keepPoster !== '' && !isVideoPath(path) ? keepPoster : path);
       if (keepPoster !== '') {
@@ -5310,6 +5440,10 @@ export class MessageStore {
       });
       if (done && path !== '') {
         this.videoFileToMsg.delete(id);
+        const completedEntry = this.messages.find((m: MessageEntry): boolean => m.videoFileId === id);
+        if (completedEntry !== undefined) {
+          this.noteCacheForEntry(completedEntry);
+        }
       }
       return;
     }
@@ -6004,6 +6138,7 @@ export class MessageStore {
       } else if (t === 'chatTypeSupergroup') {
         this.groupId = (type['supergroup_id'] as number | undefined) ?? 0;
         this.isGroupFlag = true;
+        this.isChannel = (type['is_channel'] as boolean | undefined) ?? false;
         this.resolveSupergroup(this.groupId);
       }
     }
@@ -6329,7 +6464,11 @@ export class MessageStore {
     const sg: TdRequest = { '@type': 'getSupergroup' };
     sg['supergroup_id'] = id;
     this.client.send(sg).then((s: TdObject) => {
+      const wasChannel: boolean = this.isChannel;
       this.isChannel = (s['is_channel'] as boolean | undefined) ?? this.isChannel;
+      if (this.isChannel !== wasChannel) {
+        this.onAutoDownloadPolicyChanged();
+      }
       const c = (s['member_count'] as number | undefined) ?? 0;
       if (c > 0) {
         this.setMemberSubtitle(c);
@@ -6874,6 +7013,34 @@ export class MessageStore {
     // （send-succeeded / updateMessageContent）会整条重建 entry 把它冲掉，于是
     // 气泡落到「photoFileId === 0 且 photoPath === ''」那一支——灰底加播放键，
     // 就是用户看到的样子。这里是每次 upsert 都会经过的水合点，补在这儿才活得下来。
+    if (hydrated.videoFileId !== 0 && hydrated.videoPath !== '' && hydrated.sendState !== 'sending') {
+      publishProgress(hydrated.videoFileId, 100);
+      publishThumbActive(hydrated.videoFileId, false);
+    } else if (hydrated.videoFileId !== 0 && hydrated.videoPath === '' && hydrated.sendState !== 'sending') {
+      if (hydrated.contentType === 'video' && !hydrated.isAnimation &&
+        !this.videoFileToMsg.has(hydrated.videoFileId)) {
+        if (hydrated.videoProgress !== 0 || hydrated.mediaDownloadActive) {
+          if (hydrated === entry) {
+            hydrated = cloneMessage(entry);
+          }
+          hydrated.videoProgress = 0;
+          hydrated.mediaDownloadActive = false;
+        }
+        publishProgress(hydrated.videoFileId, 0);
+        publishThumbActive(hydrated.videoFileId, false);
+      } else if (hydrated.contentType === 'file') {
+        if (hydrated.mediaDownloadActive) {
+          this.videoFileToMsg.set(hydrated.videoFileId, hydrated.id);
+          this.userRequestedFiles.add(hydrated.videoFileId);
+          this.managedFiles.add(hydrated.videoFileId);
+        } else if (hydrated.videoProgress > 0 && !this.videoFileToMsg.has(hydrated.videoFileId)) {
+          this.managedFiles.add(hydrated.videoFileId);
+          this.userPausedFiles.add(hydrated.videoFileId);
+        }
+        publishProgress(hydrated.videoFileId, hydrated.videoProgress);
+        publishThumbActive(hydrated.videoFileId, hydrated.mediaDownloadActive);
+      }
+    }
     const localPoster: string = (hydrated.videoFileId !== 0
       ? (this.localVideoPosters.get(hydrated.videoFileId) ?? '') : '') ||
       (hydrated.photoFileId !== 0
@@ -6942,6 +7109,7 @@ export class MessageStore {
       fn(c);
       if (c.sendState !== 'sending') {
         publishProgress(c.videoFileId, c.videoProgress);
+        publishThumbActive(c.videoFileId, c.mediaDownloadActive);
       }
       const after: PatchSignature = {
         path: c.videoPath, failed: c.videoFailed, active: c.mediaDownloadActive

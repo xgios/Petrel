@@ -2,7 +2,7 @@ import { HOLD_SPEED_LIMIT_OPTIONS, HOLD_SPEED_LIMIT_DEFAULT, normalizeHoldSpeedL
 import { router } from '@kit.ArkUI';
 import { HdsSubDestination } from '../common/HdsSubDestination';
 import {
-  setBoolean, setNumber, KEY_VIDEO_AUTO_PRELOAD,
+  setBoolean, setNumber,
   KEY_POWER_AUTOPLAY_VIDEO, KEY_POWER_AUTOPLAY_GIF, KEY_AUTOPLAY_MUTED,
   KEY_AUTOPLAY_MAX_MB, AUTOPLAY_MAX_MB_OPTIONS, KEY_HOLD_SPEED_LIMIT,
   KEY_BG_PLAY_MUSIC, KEY_BG_PLAY_VOICE, KEY_BG_PLAY_VIDEO, KEY_BG_PLAY_LIVE
@@ -31,7 +31,6 @@ export struct MediaSettingsPage {
   @StorageProp('topSafeHeight') topSafe: number = 0;
   @StorageProp('bottomSafeHeight') bottomSafe: number = 0;
   private pageScroller: Scroller = new Scroller();
-  @StorageProp(KEY_VIDEO_AUTO_PRELOAD) videoAutoPreload: boolean = true;
   @StorageProp(KEY_POWER_AUTOPLAY_VIDEO) autoplayVideo: boolean = true;
   @StorageProp(KEY_POWER_AUTOPLAY_GIF) autoplayGif: boolean = true;
   @StorageProp(KEY_AUTOPLAY_MUTED) autoplayMuted: boolean = true;
@@ -121,9 +120,6 @@ export struct MediaSettingsPage {
         Divider().strokeWidth(0.5).color(COLOR_DIVIDER).margin({ left: 14 });
         this.autoplaySizeRow();
       }
-      Divider().strokeWidth(0.5).color(COLOR_DIVIDER).margin({ left: 14 });
-      this.toggleRow(str('ms_video_auto_preload'), str('ms_video_auto_preload_sub'), this.videoAutoPreload,
-        (next: boolean): void => setBoolean(KEY_VIDEO_AUTO_PRELOAD, next));
       Divider().strokeWidth(0.5).color(COLOR_DIVIDER).margin({ left: 14 });
       this.toggleRow(str('power_autoplay_gif'), '', this.autoplayGif,
         (next: boolean): void => setBoolean(KEY_POWER_AUTOPLAY_GIF, next));

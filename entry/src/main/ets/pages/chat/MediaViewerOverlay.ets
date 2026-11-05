@@ -1318,7 +1318,9 @@ export struct MediaViewerOverlay {
     if (mediaEntryIsVideo(e)) {
       return e.videoPath !== '';
     }
-    return e.photoFullFileId !== 0 ? e.photoFullPath !== '' : e.photoPath !== '';
+    return e.photoFullFileId !== 0
+      ? (e.photoFullPath !== '' || thumbPathFor(e.photoFullFileId) !== '')
+      : (e.photoPath !== '' || thumbPathFor(e.photoFileId) !== '');
   }
 
   // 右上角「⋮」菜单。从下载中心打开时去掉「所有媒体」「后台缓存」：前者没有会话可去，后者本来就在下载中心里。
@@ -1556,7 +1558,7 @@ export struct MediaViewerOverlay {
   private photoUpgrading(): boolean {
     const e = this.entry();
     return e !== null && e.photoFullPath === '' && e.photoFullFileId !== 0 &&
-      !e.photoFullFailed;
+      this.liveThumbPath(e.photoFullFileId) === '' && !e.photoFullFailed;
   }
 
   private photoProgressFor(id: number): number {

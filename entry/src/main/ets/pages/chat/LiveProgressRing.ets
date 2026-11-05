@@ -1,4 +1,6 @@
-import { progressFor, subscribeProgress } from '../../util/mediaProgressChannel';
+import {
+  progressFor, subscribeProgress, subscribeThumbActive, thumbActiveFor
+} from '../../util/mediaProgressChannel';
 
 // 自己订阅、自己更新的下载进度环。
 //
@@ -21,15 +23,22 @@ export struct LiveProgressRing {
   @Param fileId: number = 0;
   @Param initialPercent: number = 0;
   @Param ringSize: number = 36;
+  @Param showDownloadIcon: boolean = false;
   @Local private percent: number = 0;
+  @Local private active: boolean = false;
   private unsubProgress: (() => void) | null = null;
+  private unsubActive: (() => void) | null = null;
 
   private attach(fileId: number, initialPercent: number): void {
     this.detach();
     const known: number = progressFor(fileId);
     this.percent = known > 0 ? known : initialPercent;
+    this.active = thumbActiveFor(fileId);
     this.unsubProgress = subscribeProgress(fileId, (percent: number): void => {
       this.percent = percent;
+    });
+    this.unsubActive = subscribeThumbActive(fileId, (active: boolean): void => {
+      this.active = active;
     });
   }
 
@@ -37,6 +46,10 @@ export struct LiveProgressRing {
     if (this.unsubProgress !== null) {
       this.unsubProgress();
       this.unsubProgress = null;
+    }
+    if (this.unsubActive !== null) {
+      this.unsubActive();
+      this.unsubActive = null;
     }
   }
 
@@ -67,7 +80,25 @@ export struct LiveProgressRing {
 
   build() {
     Stack() {
-      if (this.percent > 0) {
+      if (this.showDownloadIcon) {
+        if (this.active || this.percent > 0) {
+          if (this.percent > 0) {
+            Progress({ value: this.percent, total: 100, type: ProgressType.Ring })
+              .width(this.ringSize).height(this.ringSize).color(Color.White)
+              .style({ strokeWidth: 2.5 });
+          } else {
+            LoadingProgress()
+              .width(this.ringSize).height(this.ringSize).color(Color.White);
+          }
+          SymbolGlyph($r('sys.symbol.arrow_down'))
+            .fontSize(Math.max(16, this.ringSize * 0.44))
+            .fontColor([Color.White]);
+        } else {
+          SymbolGlyph($r('sys.symbol.arrow_down'))
+            .fontSize(Math.max(18, this.ringSize * 0.52))
+            .fontColor([Color.White]);
+        }
+      } else if (this.percent > 0) {
         Progress({ value: this.percent, total: 100, type: ProgressType.Ring })
           .width(this.ringSize).height(this.ringSize).color(Color.White)
           .style({ strokeWidth: 2.5 });
@@ -80,9 +111,10 @@ export struct LiveProgressRing {
           .width(this.ringSize * 0.72).height(this.ringSize * 0.72).color(Color.White);
       }
     }
-    .padding(6)
+    .width(this.ringSize + 12)
+    .height(this.ringSize + 12)
     .backgroundColor('#73000000')
     .border({ width: 0.5, color: '#24FFFFFF' })
-    .borderRadius(this.ringSize);
+    .borderRadius((this.ringSize + 12) / 2);
   }
 }
